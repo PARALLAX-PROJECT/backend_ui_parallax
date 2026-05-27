@@ -1,0 +1,13 @@
+Flask==3.0.3
+Flask-SQLAlchemy==3.1.1
+Flask-Migrate==4.0.7
+Flask-JWT-Extended==4.6.0
+Flask-CORS==4.0.1
+Werkzeug==3.0.3
+python-dotenv==1.0.1
+python-magic==0.4.27
+SQLAlchemy==2.0.31
+alembic==1.13.2
+marshmallow==3.21.3
+cryptography==43.0.1
+flasgger==0.9.7.1
