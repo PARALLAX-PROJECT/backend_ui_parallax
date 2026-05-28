@@ -9,7 +9,7 @@ les statuts selon les seuils du protocole heartbeat (rapport §2.3.11) :
 """
 import logging
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class NodeMonitor:
             overload_high = cfg["HB_OVERLOAD_HIGH"]
             overload_low = cfg["HB_OVERLOAD_LOW"]
 
-            now = datetime.now(timezone.utc)
+            now = datetime.utcnow()
             nodes = Node.query.filter(
                 Node.status != NodeStatus.ETEINT.value,
                 Node.status != NodeStatus.EN_MAINTENANCE.value,
