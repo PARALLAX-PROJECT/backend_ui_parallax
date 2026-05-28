@@ -22,7 +22,7 @@ PARALLAX fédère les machines hétérogènes sous-utilisées du campus en un su
 
 ```
 ┌──────────────────────────────────────────────────┐
-│             Interface Web (Next.js)              │
+│          Interface Web (React + Vite)            │
 │   Chercheur · Gestionnaire                       │
 └──────────────────────┬───────────────────────────┘
                        │ HTTPS / JWT
@@ -144,6 +144,8 @@ Elle documente les 26 endpoints répartis en 5 domaines :
 Le fichier [`workflow.md`](workflow.md) décrit le workflow complet que le développeur frontend
 doit suivre pour communiquer avec ce backend, en précisant à chaque étape
 ce que représente chaque appel pour l'utilisateur final.
+
+Le portail React (frontend) est disponible dans un dépôt séparé : **PARALLAX Portal**.
 
 ---
 
