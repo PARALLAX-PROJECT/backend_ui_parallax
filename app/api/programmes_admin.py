@@ -184,6 +184,69 @@ def get_programme_admin(programme_id: str):
     return success(data=data)
 
 
+@bp.route("/<programme_id>/tasks", methods=["GET"])
+@jwt_required()
+@gestionnaire_required
+def list_programme_tasks_admin(programme_id: str):
+    """
+    Lister les sous-tâches atomiques d'un programme (vue gestionnaire).
+    ---
+    tags:
+      - Cluster — Programmes (Gestionnaire)
+    summary: Sous-tâches d'un programme (admin)
+    description: |
+      Retourne toutes les tâches atomiques d'un programme, quelle que soit son origine.
+      Contrairement à `GET /api/tasks/{id}/tasks`, cet endpoint n'exige pas
+      que le programme appartienne à l'utilisateur courant.
+    security:
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: programme_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    responses:
+      200:
+        description: Liste des sous-tâches.
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ApiSuccessResponse'
+              properties:
+                data:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/TacheAtomiqueResponse'
+      401:
+        description: Token manquant ou invalide.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+      403:
+        description: Rôle gestionnaire requis.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+      404:
+        description: Programme introuvable.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+    """
+    prog = Programme.query.get(programme_id)
+    if prog is None:
+        return not_found("Programme")
+
+    taches = prog.taches.order_by(TacheAtomique.created_at.asc()).all()
+    return success(data=[t.to_dict() for t in taches])
+
+
 @bp.route("/<programme_id>/cancel", methods=["POST"])
 @jwt_required()
 @gestionnaire_required
