@@ -35,8 +35,8 @@ def gestionnaire_required(fn):
 
 
 def chercheur_required(fn):
-    """Alias : route accessible uniquement aux chercheurs."""
-    return require_role(UserRole.CHERCHEUR.value)(fn)
+    """Alias : route accessible aux chercheurs et étudiants."""
+    return require_role(UserRole.CHERCHEUR.value, UserRole.ETUDIANT.value)(fn)
 
 
 def cluster_internal(fn):

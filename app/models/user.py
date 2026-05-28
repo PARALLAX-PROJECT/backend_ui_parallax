@@ -11,6 +11,7 @@ from app.extensions import db
 
 class UserRole(str, PyEnum):
     CHERCHEUR = "chercheur"
+    ETUDIANT = "etudiant"
     GESTIONNAIRE = "gestionnaire"
 
 
@@ -37,7 +38,7 @@ class User(db.Model):
     email: Mapped[str] = mapped_column(String(120), unique=True, nullable=False, index=True)
     _password_hash: Mapped[str] = mapped_column("password_hash", String(256), nullable=False)
     role: Mapped[str] = mapped_column(
-        SAEnum(UserRole, values_callable=lambda x: [e.value for e in x]),
+        SAEnum(UserRole, values_callable=lambda x: [e.value for e in x], native_enum=False),
         nullable=False,
         default=UserRole.CHERCHEUR.value,
     )
@@ -65,6 +66,10 @@ class User(db.Model):
     @property
     def is_gestionnaire(self) -> bool:
         return self.role == UserRole.GESTIONNAIRE.value
+
+    @property
+    def is_chercheur_or_etudiant(self) -> bool:
+        return self.role in (UserRole.CHERCHEUR.value, UserRole.ETUDIANT.value)
 
     def to_dict(self) -> dict:
         return {

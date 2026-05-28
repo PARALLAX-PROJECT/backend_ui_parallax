@@ -95,8 +95,9 @@ def register():
         return error("Adresse e-mail invalide.")
     if len(password) < 8:
         return error("Le mot de passe doit comporter au moins 8 caractères.")
-    if role not in (UserRole.CHERCHEUR.value, UserRole.GESTIONNAIRE.value):
-        return error(f"Rôle invalide. Valeurs acceptées : chercheur, gestionnaire.")
+    allowed_roles = (UserRole.CHERCHEUR.value, UserRole.ETUDIANT.value, UserRole.GESTIONNAIRE.value)
+    if role not in allowed_roles:
+        return error(f"Rôle invalide. Valeurs acceptées : chercheur, etudiant, gestionnaire.")
 
     if User.query.filter_by(username=username).first():
         return conflict(f"Le nom d'utilisateur « {username} » est déjà pris.")
