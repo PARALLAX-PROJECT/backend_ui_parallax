@@ -39,9 +39,11 @@ from flask import current_app
 logger = logging.getLogger(__name__)
 
 # ─── Layout binaire de message_t ────────────────────────────────────────────
-# long (8) + char[64] + char[64] + uint64_t (8) = 144 octets
-_MSG_FMT = "=l64s64sQ"          # '=' = native byte order sans alignement forcé
-MSG_HEADER_SIZE: int = struct.calcsize(_MSG_FMT)  # 144
+# Sur Linux 64-bit : long = 8 octets (natif)
+# '@' = native byte order ET native size (long=8 sur 64-bit)
+# char[64] + char[64] + uint64_t(8) → total header = 8+64+64+8 = 144 octets
+_MSG_FMT = "@l64s64sQ"
+MSG_HEADER_SIZE: int = struct.calcsize(_MSG_FMT)  # 144 sur 64-bit Linux
 
 # Types de messages reconnus
 MSG_DISCOVER_MASTER = "DISCOVER_MASTER"
