@@ -581,3 +581,46 @@ def toggle_maintenance(node_uuid: str):
 
     db.session.commit()
     return success(data=node.to_dict(), message=msg)
+
+
+
+# ──────────────────────────────────────────────
+# GET /api/nodes/master
+# ──────────────────────────────────────────────
+@bp.route("/master", methods=["GET"])
+@jwt_required()
+def get_master():
+    """
+    Retourne les informations du nœud maître actif.
+    Accessible à tous les utilisateurs authentifiés (chercheurs, étudiants, gestionnaires).
+    Utilisé par le frontend pour afficher le maître courant avant soumission.
+    """
+    from app.models.node import NodeRole
+    master = Node.query.filter_by(
+        role=NodeRole.MASTER.value,
+        status=NodeStatus.ACTIF.value,
+    ).first()
+
+    controller = Node.query.filter_by(
+        role=NodeRole.CONTROLLER.value,
+        status=NodeStatus.ACTIF.value,
+    ).first()
+
+    if master is None:
+        return success(
+            data={
+                "master": None,
+                "controller": controller.to_dict() if controller else None,
+                "cluster_ready": False,
+            },
+            message="Aucun nœud maître actif dans le cluster.",
+        )
+
+    return success(
+        data={
+            "master": master.to_dict(),
+            "controller": controller.to_dict() if controller else None,
+            "cluster_ready": True,
+        },
+        message="Nœud maître trouvé.",
+    )

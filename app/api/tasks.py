@@ -11,16 +11,20 @@ Routes :
   GET    /<id>/logs     – Logs d'exécution
   GET    /<id>/tasks    – Sous-tâches atomiques du programme
 """
+import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
-from flask import Blueprint, request, send_file
+from flask import Blueprint, current_app, request, send_file
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
 from app.extensions import db
+from app.models.node import Node, NodeRole, NodeStatus
 from app.models.programme import Programme, ProgrammeStatus
 from app.models.tache import TacheAtomique
 from app.models.user import User
 from app.services import storage as storage_svc
+from app.services.dispatch import DispatchError, discover_master_ip, send_programme_to_master
 from app.services.storage import (
     ArchiveBombError,
     InvalidFileError,
@@ -400,13 +404,86 @@ def submit_programme(programme_id: str):
     if not prog.source_rel_path:
         return error("Aucun fichier source associé. Importez d'abord votre code.")
 
+    # ── 1. Résoudre l'IP du maître ──────────────────────────────────────────
+    dispatch_info = _resolve_master_ip()
+    if dispatch_info.get("error"):
+        return error(dispatch_info["error"], status=503)
+
+    master_ip: str = dispatch_info["master_ip"]
+    controller_ip: str | None = dispatch_info.get("controller_ip")
+
+    # ── 2. Envoyer le programme au maître via TCP ───────────────────────────
+    source_dir = Path(current_app.config["STORAGE_ROOT"]) / prog.source_rel_path
+    try:
+        bytes_sent = send_programme_to_master(
+            master_ip=master_ip,
+            programme_name=prog.name,
+            source_path=source_dir,
+        )
+    except DispatchError as exc:
+        return error(
+            f"Impossible d'envoyer le programme au maître ({master_ip}) : {exc}",
+            status=503,
+        )
+
+    # ── 3. Marquer comme soumis uniquement après envoi réussi ───────────────
     prog.mark_submitted()
     db.session.commit()
 
     return success(
-        data=prog.to_dict(include_progress=True),
-        message="Programme soumis. La décomposition va démarrer.",
+        data={
+            "programme": prog.to_dict(include_progress=True),
+            "dispatch": {
+                "master_ip": master_ip,
+                "controller_ip": controller_ip,
+                "bytes_sent": bytes_sent,
+            },
+        },
+        message=f"Programme envoyé au maître {master_ip}. Décomposition en cours.",
     )
+
+
+def _resolve_master_ip() -> dict:
+    """
+    Détermine l'IP du nœud maître en deux étapes :
+
+    Étape 1 — Via le contrôleur (si enregistré en base) :
+      → Envoie un message DISCOVER_MASTER au contrôleur
+      ← Reçoit l'IP du maître courant
+
+    Étape 2 — Fallback direct en base :
+      → Cherche le nœud avec role=master et status=actif
+    """
+    # Chercher un contrôleur actif
+    controller: Node | None = Node.query.filter_by(
+        role=NodeRole.CONTROLLER.value,
+        status=NodeStatus.ACTIF.value,
+    ).first()
+
+    if controller:
+        try:
+            master_ip = discover_master_ip(controller.ip)
+            return {"master_ip": master_ip, "controller_ip": controller.ip}
+        except DispatchError as exc:
+            logging.getLogger(__name__).warning(
+                "Contrôleur %s inaccessible, fallback DB : %s", controller.ip, exc
+            )
+
+    # Fallback : maître en base
+    master: Node | None = Node.query.filter_by(
+        role=NodeRole.MASTER.value,
+        status=NodeStatus.ACTIF.value,
+    ).first()
+
+    if master:
+        return {"master_ip": master.ip, "controller_ip": None}
+
+    return {
+        "error": (
+            "Aucun nœud maître disponible. "
+            "Vérifiez que le cluster est démarré et qu'un agent maître est enregistré."
+        )
+    }
 
 
 # ──────────────────────────────────────────────

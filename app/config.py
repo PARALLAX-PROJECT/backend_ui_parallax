@@ -40,6 +40,17 @@ class Config:
     # --- Clé interne cluster (partagée avec les agents) ---
     CLUSTER_INTERNAL_KEY = os.environ.get("CLUSTER_INTERNAL_KEY", "cluster-internal-dev")
 
+    # --- Dispatch TCP vers les agents C ---
+    # Port sur lequel le contrôleur écoute les requêtes DISCOVER_MASTER
+    CONTROLLER_DISPATCH_PORT = int(os.environ.get("CONTROLLER_DISPATCH_PORT", 9001))
+    # Port sur lequel le maître écoute les soumissions de programmes
+    MASTER_DISPATCH_PORT = int(os.environ.get("MASTER_DISPATCH_PORT", 9000))
+    # Timeout (secondes) pour toute connexion TCP vers les agents
+    DISPATCH_TIMEOUT_S = float(os.environ.get("DISPATCH_TIMEOUT_S", 10.0))
+    # Constantes structure program_message_t — doivent correspondre au code C agent
+    PROG_NAME_MAX = int(os.environ.get("PROG_NAME_MAX", 256))
+    PROG_CODE_MAX = int(os.environ.get("PROG_CODE_MAX", 1_048_576))  # 1 Mo
+
     # --- Paramètres heartbeat ---
     HB_PERIOD_S = 2           # période unicast heartbeat
     HB_SUSPECT_THRESHOLD_S = 4  # délai avant SUSPECTED
