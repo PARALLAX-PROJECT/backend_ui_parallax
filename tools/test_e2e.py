@@ -138,6 +138,22 @@ def http_multipart(path: str, fields: dict, files: dict, token: str) -> dict:
 
 # ─── Simulateurs intégrés ─────────────────────────────────────────────────────
 
+def free_port(port: int) -> None:
+    """Libère un port TCP occupé en envoyant SIGTERM au processus concerné."""
+    import subprocess
+    result = subprocess.run(
+        ["fuser", f"{port}/tcp"], capture_output=True, text=True
+    )
+    pids = result.stdout.strip().split()
+    for pid in pids:
+        try:
+            os.kill(int(pid), 15)   # SIGTERM
+        except (ProcessLookupError, PermissionError, ValueError):
+            pass
+    if pids:
+        time.sleep(0.4)            # laisser le temps au noyau de libérer le port
+
+
 class ControllerSim(threading.Thread):
     """Contrôleur simulé : répond MASTER_IP=127.0.0.1 à toute requête DISCOVER_MASTER."""
     def __init__(self, port: int, master_ip: str = "127.0.0.1"):
@@ -145,6 +161,7 @@ class ControllerSim(threading.Thread):
         self.port = port
         self.master_ip = master_ip
         self.ready = threading.Event()
+        self.error: str | None = None
         self.requests_served = 0
 
     def run(self):
@@ -153,7 +170,8 @@ class ControllerSim(threading.Thread):
         try:
             srv.bind(("127.0.0.1", self.port))
         except OSError as e:
-            print(f"    {c('fail','✗')} ControllerSim bind ::{self.port} → {e}")
+            self.error = str(e)
+            self.ready.set()   # débloquer wait() même en cas d'erreur
             return
         srv.listen(5)
         srv.settimeout(0.5)
@@ -182,6 +200,7 @@ class MasterSim(threading.Thread):
         super().__init__(daemon=True)
         self.port = port
         self.ready = threading.Event()
+        self.error: str | None = None
         self.received: list[dict] = []     # liste des programmes reçus
 
     def run(self):
@@ -190,7 +209,8 @@ class MasterSim(threading.Thread):
         try:
             srv.bind(("127.0.0.1", self.port))
         except OSError as e:
-            print(f"    {c('fail','✗')} MasterSim bind ::{self.port} → {e}")
+            self.error = str(e)
+            self.ready.set()
             return
         srv.listen(5)
         srv.settimeout(0.5)
@@ -248,11 +268,15 @@ def test_proto_only():
     ok(f"program_message_t OK — {len(prog_data)} octets, code {len(code)} o")
 
     step("P3", "Test protocole — aller-retour TCP loopback (ctrl sim)")
-    ctrl_sim = ControllerSim(port=CONTROLLER_PORT + 100, master_ip="192.168.1.42")
+    proto_port = CONTROLLER_PORT + 100
+    free_port(proto_port)
+    ctrl_sim = ControllerSim(port=proto_port, master_ip="192.168.1.42")
     ctrl_sim.start()
     ctrl_sim.ready.wait(timeout=2)
+    if ctrl_sim.error:
+        fail(f"ControllerSim port {proto_port}: {ctrl_sim.error}")
 
-    with socket.create_connection(("127.0.0.1", CONTROLLER_PORT + 100), timeout=3) as s:
+    with socket.create_connection(("127.0.0.1", proto_port), timeout=3) as s:
         proto.send_message(s, 1, "DISCOVER_MASTER", "CONTROLLER")
         resp = proto.recv_message(s)
     assert resp["type"] == "MASTER_IP", resp
@@ -269,16 +293,32 @@ def run_e2e(start_backend: bool):
     # ── 0. Démarrer les simulateurs ────────────────────────────────────────
     step("0", "Démarrage des simulateurs TCP")
 
+    # Libérer les ports s'ils sont déjà occupés (ex. run précédent)
+    for port in (CONTROLLER_PORT, MASTER_PORT):
+        try:
+            s = socket.socket()
+            s.connect(("127.0.0.1", port))
+            s.close()
+            # Port occupé → libérer
+            info(f"Port {port} déjà utilisé — libération…")
+            free_port(port)
+        except ConnectionRefusedError:
+            pass   # port libre, rien à faire
+
     ctrl_sim = ControllerSim(port=CONTROLLER_PORT, master_ip="127.0.0.1")
     ctrl_sim.start()
-    if not ctrl_sim.ready.wait(timeout=3):
-        fail(f"ControllerSim n'a pas démarré sur :{CONTROLLER_PORT}")
+    ctrl_sim.ready.wait(timeout=3)
+    if ctrl_sim.error:
+        fail(f"ControllerSim :{CONTROLLER_PORT} → {ctrl_sim.error}\n"
+             f"       Libérez le port manuellement : fuser -k {CONTROLLER_PORT}/tcp")
     ok(f"Simulateur contrôleur démarré sur 127.0.0.1:{CONTROLLER_PORT}")
 
     master_sim = MasterSim(port=MASTER_PORT)
     master_sim.start()
-    if not master_sim.ready.wait(timeout=3):
-        fail(f"MasterSim n'a pas démarré sur :{MASTER_PORT}")
+    master_sim.ready.wait(timeout=3)
+    if master_sim.error:
+        fail(f"MasterSim :{MASTER_PORT} → {master_sim.error}\n"
+             f"       Libérez le port manuellement : fuser -k {MASTER_PORT}/tcp")
     ok(f"Simulateur maître démarré sur 127.0.0.1:{MASTER_PORT}")
 
     # ── 1. Vérifier le backend ─────────────────────────────────────────────
