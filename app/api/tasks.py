@@ -404,10 +404,35 @@ def submit_programme(programme_id: str):
     if not prog.source_rel_path:
         return error("Aucun fichier source associé. Importez d'abord votre code.")
 
+    dispatch_required: bool = current_app.config.get("DISPATCH_REQUIRED", False)
+    log = logging.getLogger(__name__)
+
     # ── 1. Résoudre l'IP du maître ──────────────────────────────────────────
     dispatch_info = _resolve_master_ip()
+    dispatch_skipped = False
+    dispatch_warning: str | None = None
+
     if dispatch_info.get("error"):
-        return error(dispatch_info["error"], status=503)
+        if dispatch_required:
+            return error(dispatch_info["error"], status=503)
+        # Fallback : soumettre sans dispatch (dev / cluster non configuré)
+        dispatch_skipped = True
+        dispatch_warning = dispatch_info["error"]
+        log.warning("Dispatch ignoré (DISPATCH_REQUIRED=false) : %s", dispatch_warning)
+        prog.mark_submitted()
+        db.session.commit()
+        return success(
+            data={
+                "programme": prog.to_dict(include_progress=True),
+                "dispatch": None,
+                "dispatch_skipped": True,
+                "dispatch_warning": dispatch_warning,
+            },
+            message=(
+                "Programme soumis (sans dispatch cluster). "
+                "Lancez les simulateurs et soumettez à nouveau pour tester le dispatch TCP."
+            ),
+        )
 
     master_ip: str = dispatch_info["master_ip"]
     controller_ip: str | None = dispatch_info.get("controller_ip")
@@ -421,9 +446,23 @@ def submit_programme(programme_id: str):
             source_path=source_dir,
         )
     except DispatchError as exc:
-        return error(
-            f"Impossible d'envoyer le programme au maître ({master_ip}) : {exc}",
-            status=503,
+        if dispatch_required:
+            return error(
+                f"Impossible d'envoyer le programme au maître ({master_ip}) : {exc}",
+                status=503,
+            )
+        # Fallback : soumettre malgré l'échec TCP
+        log.warning("Envoi TCP échoué, soumission quand même : %s", exc)
+        prog.mark_submitted()
+        db.session.commit()
+        return success(
+            data={
+                "programme": prog.to_dict(include_progress=True),
+                "dispatch": {"master_ip": master_ip, "controller_ip": controller_ip},
+                "dispatch_skipped": True,
+                "dispatch_warning": str(exc),
+            },
+            message=f"Programme soumis (maître {master_ip} inaccessible — vérifiez le simulateur).",
         )
 
     # ── 3. Marquer comme soumis uniquement après envoi réussi ───────────────
@@ -438,6 +477,7 @@ def submit_programme(programme_id: str):
                 "controller_ip": controller_ip,
                 "bytes_sent": bytes_sent,
             },
+            "dispatch_skipped": False,
         },
         message=f"Programme envoyé au maître {master_ip}. Décomposition en cours.",
     )

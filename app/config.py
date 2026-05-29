@@ -50,6 +50,9 @@ class Config:
     # Constantes structure program_message_t — doivent correspondre au code C agent
     PROG_NAME_MAX = int(os.environ.get("PROG_NAME_MAX", 256))
     PROG_CODE_MAX = int(os.environ.get("PROG_CODE_MAX", 1_048_576))  # 1 Mo
+    # Si False (défaut dev) : soumettre même sans cluster configuré (avertissement)
+    # Si True  (prod)       : refuser la soumission si aucun maître n'est joignable
+    DISPATCH_REQUIRED = os.environ.get("DISPATCH_REQUIRED", "false").lower() == "true"
 
     # --- Paramètres heartbeat ---
     HB_PERIOD_S = 2           # période unicast heartbeat
