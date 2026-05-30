@@ -6,7 +6,8 @@ Routes :
   POST   /import        – Upload du code source (multipart/form-data)
   GET    /<id>          – Détail d'un programme + progression
   POST   /<id>/submit   – Soumettre pour exécution distribuée
-  DELETE /<id>          – Annuler / supprimer un programme
+  POST   /<id>/cancel   – Annuler l'exécution d'un programme (sans suppression)
+  DELETE /<id>          – Supprimer définitivement un programme
   GET    /<id>/result   – Télécharger l'archive de résultats (ZIP)
   GET    /<id>/logs     – Logs d'exécution
   GET    /<id>/tasks    – Sous-tâches atomiques du programme
@@ -524,6 +525,67 @@ def _resolve_master_ip() -> dict:
             "Vérifiez que le cluster est démarré et qu'un agent maître est enregistré."
         )
     }
+
+
+# ──────────────────────────────────────────────
+# POST /api/tasks/<id>/cancel
+# ──────────────────────────────────────────────
+@bp.route("/<programme_id>/cancel", methods=["POST"])
+@jwt_required()
+def cancel_own_programme(programme_id: str):
+    """
+    Annuler un programme en cours (sans le supprimer).
+    ---
+    tags:
+      - Projets (Chercheur)
+    summary: Annuler l'exécution
+    description: |
+      Annule toutes les sous-tâches actives et passe le programme en statut `annule`.
+      Le programme reste accessible (logs, métadonnées). Utilisez DELETE pour le supprimer.
+    security:
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: programme_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    responses:
+      200:
+        description: Programme annulé.
+      404:
+        description: Programme introuvable.
+      409:
+        description: Le programme est déjà dans un état terminal.
+    """
+    user_id = get_jwt_identity()
+    prog, err_resp = _get_programme_or_404(programme_id, user_id)
+    if err_resp:
+        return err_resp
+
+    if prog.is_terminal:
+        return error(
+            f"Programme déjà dans un état terminal : {prog.status}.", status=409
+        )
+
+    active_tasks = prog.taches.filter(
+        TacheAtomique.status.in_([
+            "en_attente", "assignee", "en_cours", "migree",
+        ])
+    ).all()
+
+    for t in active_tasks:
+        t.status = "echouee"
+        t.error_message = "Annulé par le chercheur."
+
+    prog.mark_cancelled()
+    db.session.commit()
+
+    return success(
+        data=prog.to_dict(include_progress=True),
+        message=f"Programme annulé. {len(active_tasks)} sous-tâche(s) interrompue(s).",
+    )
 
 
 # ──────────────────────────────────────────────

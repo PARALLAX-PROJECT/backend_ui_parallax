@@ -45,3 +45,4 @@ Thumbs.db
 
 # Flask / flasgger cache
 .flask_cache/
+logs/
