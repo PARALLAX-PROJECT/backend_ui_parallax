@@ -36,16 +36,16 @@ FROM python:3.11-slim-bookworm AS final
 
 # ---------- Métadonnées ----------
 LABEL maintainer="ENSPY – Département Génie Informatique" \
-      description="PARALLAX Backend REST API – Flask 3.0 / Gunicorn" \
-      version="1.0"
+    description="PARALLAX Backend REST API – Flask 3.0 / Gunicorn" \
+    version="1.0"
 
 # ---------- Dépendances système ----------
 # libmagic1   → requise par python-magic (validation MIME des uploads)
 # curl        → utile pour les health-checks Docker / orchestrateurs
 # Nettoyage du cache apt en fin de ligne pour réduire la taille de la couche
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libmagic1 \
-        curl \
+    libmagic1 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------- Copie des packages Python depuis l'étape de build ----------
@@ -70,7 +70,7 @@ COPY . .
 # ---------- Répertoire de stockage persistant ----------
 # /data/parallax/storage accueillera les fichiers uploadés par les chercheurs.
 # Ce chemin doit être monté en volume Docker pour la persistance des données.
-RUN mkdir -p /data/parallax/storage \
+RUN mkdir -p /data/parallax/storage /app/instance \
     && chown -R parallax:parallax /data/parallax /app
 
 # ---------- Port exposé ----------
