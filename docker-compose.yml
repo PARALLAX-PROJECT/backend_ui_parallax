@@ -1,0 +1,97 @@
+# ============================================================
+#  docker-compose.yml — PARALLAX Backend (production)
+#
+#  Usage :
+#    docker compose up -d          → démarrer en arrière-plan
+#    docker compose logs -f        → suivre les logs
+#    docker compose down           → arrêter et supprimer le conteneur
+#    docker compose pull && docker compose up -d  → mise à jour
+# ============================================================
+
+services:
+
+  # ── Backend Flask / Gunicorn ─────────────────────────────────────────
+  parallax-backend:
+    # Nom de l'image Docker qui sera construite localement
+    image: parallax-backend:latest
+
+    # Construire l'image depuis le Dockerfile présent dans ce répertoire
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: parallax-backend
+
+    # ── Politique de redémarrage ──────────────────────────────────────
+    # unless-stopped : le conteneur redémarre automatiquement après un crash
+    # ou un redémarrage de la VM, sauf s'il a été arrêté manuellement.
+    restart: unless-stopped
+
+    # ── Ports ────────────────────────────────────────────────────────
+    # Mapper le port 5000 du conteneur sur le port 5000 de la VM.
+    # Pour n'exposer qu'en local (derrière un reverse-proxy Nginx) :
+    #   remplacer "0.0.0.0:5000:5000" par "127.0.0.1:5000:5000"
+    ports:
+      - "0.0.0.0:5000:5000"
+
+    # ── Variables d'environnement ─────────────────────────────────────
+    # Chargées depuis le fichier .env présent à côté de ce fichier.
+    # NE PAS commit .env dans Git — voir .env.example comme référence.
+    env_file:
+      - .env
+
+    # Variables supplémentaires spécifiques à la production
+    environment:
+      # Active la configuration de production Flask (DEBUG=False)
+      FLASK_ENV: production
+      # Désactive le rechargeur automatique Werkzeug (non pertinent avec Gunicorn)
+      PARALLAX_NO_RELOAD: "1"
+      # Tuning Gunicorn (peut aussi être défini dans .env)
+      GUNICORN_WORKERS: "4"
+      GUNICORN_THREADS: "2"
+      GUNICORN_LOG_LEVEL: "info"
+
+    # ── Volumes persistants ───────────────────────────────────────────
+    # Les données doivent survivre aux redémarrages et mises à jour du conteneur.
+    volumes:
+      # Stockage des fichiers uploadés par les chercheurs
+      - parallax_storage:/data/parallax/storage
+      # Base de données SQLite (si utilisée en production)
+      # Si vous passez à PostgreSQL, ce volume peut être supprimé.
+      - parallax_db:/app/instance
+
+    # ── Healthcheck ───────────────────────────────────────────────────
+    # Docker redémarre le conteneur si le healthcheck échoue 3 fois de suite.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/docs/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    # ── Limites de ressources ─────────────────────────────────────────
+    # Adapté aux machines modestes du cluster (Core 2 Duo, 2–4 Go RAM)
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 512M
+        reservations:
+          memory: 128M
+
+    # ── Logging ───────────────────────────────────────────────────────
+    # Rotation automatique des logs pour éviter de remplir le disque
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+
+# ── Volumes nommés ───────────────────────────────────────────────────────
+# Docker gère ces volumes indépendamment du cycle de vie du conteneur.
+volumes:
+  parallax_storage:
+    driver: local
+  parallax_db:
+    driver: local

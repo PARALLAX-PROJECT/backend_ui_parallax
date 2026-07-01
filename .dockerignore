@@ -1,0 +1,45 @@
+# ============================================================
+#  .dockerignore — PARALLAX Backend
+#  Exclut les fichiers inutiles du contexte de build Docker
+#  pour réduire la taille de l'image et éviter les fuites de données.
+# ============================================================
+
+# Environnement virtuel Python (les dépendances sont installées par pip dans le conteneur)
+.venv/
+venv/
+env/
+
+# Fichiers de configuration secrets (ne JAMAIS embarquer .env dans l'image)
+.env
+*.env
+
+# Dossier Git et IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Données locales (montées en volume en production)
+instance/
+storage/
+
+# Migrations SQLite de développement (les vraies migrations Alembic dans /migrations sont gardées)
+*.db
+*.sqlite3
+
+# Documentation et fichiers non nécessaires au runtime
+*.pdf
+*.md
+*.txt
+!requirements.txt
+
+# Logs
+*.log
+logs/
