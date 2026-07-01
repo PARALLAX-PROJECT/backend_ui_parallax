@@ -44,11 +44,11 @@ services:
     environment:
       # Active la configuration de production Flask (DEBUG=False)
       FLASK_ENV: production
-      # Désactive le rechargeur automatique Werkzeug (non pertinent avec Gunicorn)
+      # Désactive le rechargeur automatique Werkzeug
       PARALLAX_NO_RELOAD: "1"
-      # Tuning Gunicorn (peut aussi être défini dans .env)
-      GUNICORN_WORKERS: "4"
-      GUNICORN_THREADS: "2"
+      # Tuning Gunicorn adapté à votre VM (1 cœur)
+      GUNICORN_WORKERS: "2"
+      GUNICORN_THREADS: "1"
       GUNICORN_LOG_LEVEL: "info"
 
     # ── Volumes persistants ───────────────────────────────────────────
