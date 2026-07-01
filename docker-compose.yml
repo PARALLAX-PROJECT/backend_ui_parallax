@@ -69,15 +69,6 @@ services:
       retries: 3
       start_period: 20s
 
-    # ── Limites de ressources ─────────────────────────────────────────
-    # Adapté aux machines modestes du cluster (Core 2 Duo, 2–4 Go RAM)
-    deploy:
-      resources:
-        limits:
-          cpus: "1.5"
-          memory: 512M
-        reservations:
-          memory: 128M
 
     # ── Logging ───────────────────────────────────────────────────────
     # Rotation automatique des logs pour éviter de remplir le disque
