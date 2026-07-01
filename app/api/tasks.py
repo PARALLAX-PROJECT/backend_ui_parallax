@@ -486,43 +486,65 @@ def submit_programme(programme_id: str):
 
 def _resolve_master_ip() -> dict:
     """
-    Détermine l'IP du nœud maître en deux étapes :
+    Détermine l'IP du nœud maître selon cette cascade :
 
-    Étape 1 — Via le contrôleur (si enregistré en base) :
+    Étape 1 — Contrôleur en base de données (nœud avec role=controller, status=actif)
+    Étape 2 — Contrôleur configuré en .env (CONTROLLER_IP)
       → Envoie un message DISCOVER_MASTER au contrôleur
       ← Reçoit l'IP du maître courant
 
-    Étape 2 — Fallback direct en base :
-      → Cherche le nœud avec role=master et status=actif
+    Étape 3 — Maître en base de données (nœud avec role=master, status=actif)
+    Étape 4 — Maître configuré en .env (MASTER_NODE_IP) — fallback ultime
     """
-    # Chercher un contrôleur actif
+    from flask import current_app
+
+    log = logging.getLogger(__name__)
+
+    # ── 1. Chercher un contrôleur actif en base ──────────────────────────
     controller: Node | None = Node.query.filter_by(
         role=NodeRole.CONTROLLER.value,
         status=NodeStatus.ACTIF.value,
     ).first()
 
-    if controller:
+    controller_ip = controller.ip if controller else None
+
+    # ── 2. Fallback : IP du contrôleur depuis la config .env ─────────────
+    if not controller_ip:
+        controller_ip = current_app.config.get("CONTROLLER_IP")
+        if controller_ip:
+            log.info("Aucun contrôleur en base, utilisation de CONTROLLER_IP=%s", controller_ip)
+
+    # ── 3. Interroger le contrôleur via DISCOVER_MASTER ──────────────────
+    if controller_ip:
         try:
-            master_ip = discover_master_ip(controller.ip)
-            return {"master_ip": master_ip, "controller_ip": controller.ip}
+            master_ip = discover_master_ip(controller_ip)
+            return {"master_ip": master_ip, "controller_ip": controller_ip}
         except DispatchError as exc:
-            logging.getLogger(__name__).warning(
-                "Contrôleur %s inaccessible, fallback DB : %s", controller.ip, exc
+            log.warning(
+                "Contrôleur %s inaccessible, tentative fallback : %s", controller_ip, exc
             )
 
-    # Fallback : maître en base
+    # ── 4. Fallback : maître actif en base ───────────────────────────────
     master: Node | None = Node.query.filter_by(
         role=NodeRole.MASTER.value,
         status=NodeStatus.ACTIF.value,
     ).first()
 
     if master:
-        return {"master_ip": master.ip, "controller_ip": None}
+        log.info("Utilisation du maître en base : %s", master.ip)
+        return {"master_ip": master.ip, "controller_ip": controller_ip}
+
+    # ── 5. Fallback ultime : MASTER_NODE_IP depuis la config .env ────────
+    master_node_ip = current_app.config.get("MASTER_NODE_IP")
+    if master_node_ip:
+        log.info("Utilisation de MASTER_NODE_IP=%s (fallback .env)", master_node_ip)
+        return {"master_ip": master_node_ip, "controller_ip": controller_ip}
 
     return {
         "error": (
             "Aucun nœud maître disponible. "
-            "Vérifiez que le cluster est démarré et qu'un agent maître est enregistré."
+            "Vérifiez que le cluster est démarré et qu'un agent maître est enregistré, "
+            "ou configurez CONTROLLER_IP / MASTER_NODE_IP dans le fichier .env."
         )
     }
 

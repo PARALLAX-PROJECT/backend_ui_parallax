@@ -595,7 +595,9 @@ def get_master():
     Accessible à tous les utilisateurs authentifiés (chercheurs, étudiants, gestionnaires).
     Utilisé par le frontend pour afficher le maître courant avant soumission.
     """
+    from flask import current_app
     from app.models.node import NodeRole
+
     master = Node.query.filter_by(
         role=NodeRole.MASTER.value,
         status=NodeStatus.ACTIF.value,
@@ -606,14 +608,23 @@ def get_master():
         status=NodeStatus.ACTIF.value,
     ).first()
 
+    # Infos de configuration .env (fallback)
+    config_controller_ip = current_app.config.get("CONTROLLER_IP")
+    config_master_ip = current_app.config.get("MASTER_NODE_IP")
+
     if master is None:
         return success(
             data={
                 "master": None,
                 "controller": controller.to_dict() if controller else None,
                 "cluster_ready": False,
+                "config_controller_ip": config_controller_ip,
+                "config_master_ip": config_master_ip,
             },
-            message="Aucun nœud maître actif dans le cluster.",
+            message=(
+                "Aucun nœud maître enregistré en base. "
+                f"Contrôleur configuré : {config_controller_ip or 'non défini'}."
+            ),
         )
 
     return success(
@@ -621,6 +632,8 @@ def get_master():
             "master": master.to_dict(),
             "controller": controller.to_dict() if controller else None,
             "cluster_ready": True,
+            "config_controller_ip": config_controller_ip,
+            "config_master_ip": config_master_ip,
         },
         message="Nœud maître trouvé.",
     )

@@ -53,6 +53,10 @@ class Config:
     # Si False (défaut dev) : soumettre même sans cluster configuré (avertissement)
     # Si True  (prod)       : refuser la soumission si aucun maître n'est joignable
     DISPATCH_REQUIRED = os.environ.get("DISPATCH_REQUIRED", "false").lower() == "true"
+    # IP du contrôleur configurée en .env (fallback si aucun contrôleur en base)
+    CONTROLLER_IP = os.environ.get("CONTROLLER_IP", "").strip() or None
+    # IP du maître configurée en .env (fallback ultime si DISCOVER_MASTER échoue)
+    MASTER_NODE_IP = os.environ.get("MASTER_NODE_IP", "").strip() or None
 
     # --- Paramètres heartbeat ---
     HB_PERIOD_S = 2           # période unicast heartbeat
