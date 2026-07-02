@@ -49,13 +49,15 @@ services:
 
     # ── Volumes persistants ───────────────────────────────────────────
     # Les données doivent survivre aux redémarrages et mises à jour du conteneur.
+    # ── Volumes persistants ───────────────────────────────────────────
     volumes:
       # Stockage des fichiers uploadés par les chercheurs
       - parallax_storage:/data/parallax/storage
       # Base de données SQLite redirigée sur le dossier local de la VM
       - ./instance:/app/instance
-      # Injection directe du script d'entrée corrigé pour contourner le build
-      - ./docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh
+      # MODIFIEZ CETTE LIGNE (remplacez /usr/local/bin/ par /app/) :
+      - ./docker-entrypoint.sh:/app/docker-entrypoint.sh
+
 
     # ── Healthcheck ───────────────────────────────────────────────────
     # Docker redémarre le conteneur si le healthcheck échoue 3 fois de suite.
