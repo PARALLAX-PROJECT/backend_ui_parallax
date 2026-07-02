@@ -44,5 +44,5 @@ exec gunicorn \
     --access-logfile - \
     --error-logfile - \
     --log-level "${GUNICORN_LOG_LEVEL:-info}" \
-    --preload-app \
-    "run:app"
+    --preload \
+    "run:create_app()"

@@ -1,11 +1,10 @@
 # ============================================================
-#  docker-compose.yml — PARALLAX Backend (production)
+#  docker-compose.yml – PARALLAX Backend (production)
 #
 #  Usage :
-#    docker compose up -d          → démarrer en arrière-plan
-#    docker compose logs -f        → suivre les logs
-#    docker compose down           → arrêter et supprimer le conteneur
-#    docker compose pull && docker compose up -d  → mise à jour
+#    docker compose up -d          – démarrer en arrière-plan
+#    docker compose logs -f        – suivre les logs
+#    docker compose down           – arrêter et supprimer le conteneur
 # ============================================================
 
 services:
@@ -27,16 +26,13 @@ services:
     # ou un redémarrage de la VM, sauf s'il a été arrêté manuellement.
     restart: unless-stopped
 
-    # ── Ports ────────────────────────────────────────────────────────
+    # ── Ports ─────────────────────────────────────────────────────────
     # Mapper le port 5000 du conteneur sur le port 5000 de la VM.
-    # Pour n'exposer qu'en local (derrière un reverse-proxy Nginx) :
-    #   remplacer "0.0.0.0:5000:5000" par "127.0.0.1:5000:5000"
     ports:
       - "0.0.0.0:5000:5000"
 
     # ── Variables d'environnement ─────────────────────────────────────
     # Chargées depuis le fichier .env présent à côté de ce fichier.
-    # NE PAS commit .env dans Git — voir .env.example comme référence.
     env_file:
       - .env
 
@@ -56,9 +52,10 @@ services:
     volumes:
       # Stockage des fichiers uploadés par les chercheurs
       - parallax_storage:/data/parallax/storage
-      # Base de données SQLite (si utilisée en production)
-      # Si vous passez à PostgreSQL, ce volume peut être supprimé.
-      - parallax_db:/app/instance
+      # Base de données SQLite redirigée sur le dossier local de la VM
+      - ./instance:/app/instance
+      # Injection directe du script d'entrée corrigé pour contourner le build
+      - ./docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh
 
     # ── Healthcheck ───────────────────────────────────────────────────
     # Docker redémarre le conteneur si le healthcheck échoue 3 fois de suite.
@@ -69,7 +66,6 @@ services:
       retries: 3
       start_period: 20s
 
-
     # ── Logging ───────────────────────────────────────────────────────
     # Rotation automatique des logs pour éviter de remplir le disque
     logging:
@@ -78,11 +74,8 @@ services:
         max-size: "10m"
         max-file: "5"
 
-
-# ── Volumes nommés ───────────────────────────────────────────────────────
-# Docker gère ces volumes indépendamment du cycle de vie du conteneur.
+# ── Volumes nommés ────────────────────────────────────────────────────
+# L'ancien volume parallax_db a été retiré car nous utilisons désormais le dossier local ./instance
 volumes:
   parallax_storage:
-    driver: local
-  parallax_db:
     driver: local
