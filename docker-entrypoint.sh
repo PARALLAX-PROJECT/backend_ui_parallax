@@ -38,8 +38,8 @@ echo "==> [PARALLAX] Migrations appliquées avec succès."
 echo "==> [PARALLAX] Lancement de Gunicorn (workers=4, threads=2)..."
 exec gunicorn \
     --bind 0.0.0.0:5000 \
-    --workers "${GUNICORN_WORKERS:-4}" \
-    --threads "${GUNICORN_THREADS:-2}" \
+    --workers "${GUNICORN_WORKERS:-2}" \
+    --threads "${GUNICORN_THREADS:-1}" \
     --timeout 120 \
     --access-logfile - \
     --error-logfile - \
