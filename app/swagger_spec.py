@@ -480,20 +480,6 @@ SWAGGER_TEMPLATE = {
                     },
                 },
             },
-            "HeartbeatRecord": {
-                "type": "object",
-                "description": "Enregistrement d'un heartbeat reçu.",
-                "properties": {
-                    "id": {"type": "integer", "example": 4821},
-                    "node_uuid": {"type": "string"},
-                    "received_at": {"type": "string", "format": "date-time"},
-                    "cpu_usage": {"type": "number", "example": 0.38},
-                    "ram_usage": {"type": "number", "example": 0.55},
-                    "tasks_in_progress": {"type": "integer", "example": 1},
-                    "score": {"type": "number", "example": 0.71},
-                    "reported_status": {"type": "string", "example": "actif"},
-                },
-            },
             "PaginatedNodesResponse": {
                 "type": "object",
                 "properties": {
@@ -527,16 +513,6 @@ SWAGGER_TEMPLATE = {
                             "en_attente": {"type": "integer", "example": 3},
                         },
                     },
-                },
-            },
-            "MaintenanceRequest": {
-                "type": "object",
-                "properties": {
-                    "enable": {
-                        "type": "boolean",
-                        "default": True,
-                        "description": "`true` pour activer la maintenance, `false` pour réactiver le nœud.",
-                    }
                 },
             },
             # ── API Interne Cluster ────────────────────────────────────────

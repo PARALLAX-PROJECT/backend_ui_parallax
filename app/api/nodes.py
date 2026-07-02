@@ -2,22 +2,67 @@
 Blueprint /api/nodes  (Gestionnaire de cluster)
 
 Routes :
-  GET    /          – Liste tous les noeuds du cluster
-  GET    /<uuid>    – Détail d'un noeud (profil + métriques courantes)
-  DELETE /<uuid>    – Retire un noeud du cluster
+  GET    /             – Liste live des noeuds du cluster (proxy Receptionist)
+  GET    /stats        – Statistiques globales du cluster (proxy Receptionist)
+  GET    /cluster-logs        – Liste des logs de programmes terminés (proxy Receptionist)
+  GET    /cluster-logs/<name> – Contenu d'un log de programme (proxy Receptionist)
+  GET    /<uuid>       – Détail live d'un noeud (proxy Receptionist)
+  GET    /<uuid>/logs  – Log d'exécution d'un noeud (proxy Receptionist)
   GET    /<uuid>/tasks – Sous-tâches assignées à ce noeud
-  GET    /stats     – Statistiques globales du cluster
+  GET    /master       – Nœud maître + contrôleur actifs (proxy Receptionist)
+
+Tout ce blueprint lit en direct le serveur HTTP du Receptionist (port 9010),
+qui lit lui-même la couche de gossip du contrôleur — voir
+app/services/receptionist_proxy.py. Rien n'est lu depuis la table `nodes` en
+base : les agents C ne s'enregistrent jamais via /api/cluster/register (aucun
+appel HTTP de leur côté), donc cette table reste vide en pratique.
+
+Pas d'actions d'écriture (retrait de nœud, mode maintenance, historique des
+heartbeats) : elles n'ont pas d'équivalent côté cluster réel aujourd'hui — ni
+mécanisme C pour décommissionner/mettre un nœud en maintenance à distance, ni
+historique de heartbeats en dehors de la table `nodes` (jamais peuplée). Les
+avoir gardées comme actions no-op sur cette table aurait juste 404 à chaque
+appel réel ; mieux vaut les réintroduire une fois qu'un mécanisme cluster
+réel existe pour les porter.
 """
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 
-from app.extensions import db
-from app.models.node import Node, NodeStatus
 from app.models.tache import TacheAtomique, TacheStatus
+from app.services.receptionist_proxy import (
+    ClusterLogNotFoundError,
+    NodeLogNotFoundError,
+    ReceptionistProxyError,
+    fetch_cluster_log_content,
+    fetch_cluster_logs,
+    fetch_live_nodes,
+    fetch_node_log,
+)
 from app.utils.decorators import gestionnaire_required
 from app.utils.responses import error, not_found, success
 
 bp = Blueprint("nodes", __name__, url_prefix="/api/nodes")
+
+
+def _live_node_to_dict(n: dict) -> dict:
+    """Normalise un noeud renvoyé par le Receptionist vers le format API habituel."""
+    return {
+        "uuid": n.get("uuid"),
+        "ip": n.get("ip"),
+        "port": n.get("port"),
+        "hostname": None,
+        "role": n.get("role"),
+        "status": n.get("status"),
+        "metrics": {
+            "cpu_usage": n.get("cpu"),
+            "ram_usage": n.get("ram"),
+            "score": n.get("score"),
+        },
+        "profile": {
+            "cpu_cores": n.get("cores"),
+            "cpu_model": n.get("model"),
+        },
+    }
 
 
 # ──────────────────────────────────────────────
@@ -63,18 +108,22 @@ def cluster_stats():
             schema:
               $ref: '#/components/schemas/ApiErrorResponse'
     """
-    total = Node.query.count()
-    actifs = Node.query.filter_by(status=NodeStatus.ACTIF.value).count()
-    surcharges = Node.query.filter_by(status=NodeStatus.SURCHARGE.value).count()
-    en_panne = Node.query.filter_by(status=NodeStatus.EN_PANNE.value).count()
-    maintenance = Node.query.filter_by(status=NodeStatus.EN_MAINTENANCE.value).count()
+    try:
+        live_nodes = fetch_live_nodes()
+    except ReceptionistProxyError as exc:
+        return error(str(exc), status=503)
+
+    actifs = sum(1 for n in live_nodes if n.get("status") in ("active", "suspect"))
+    surcharges = sum(1 for n in live_nodes if n.get("status") == "overloaded")
+    en_panne = sum(1 for n in live_nodes if n.get("status") == "failed")
+    maintenance = sum(1 for n in live_nodes if n.get("status") == "maintenance")
 
     tasks_running = TacheAtomique.query.filter_by(status=TacheStatus.EN_COURS.value).count()
     tasks_waiting = TacheAtomique.query.filter_by(status=TacheStatus.EN_ATTENTE.value).count()
 
     return success(data={
         "nodes": {
-            "total": total,
+            "total": len(live_nodes),
             "actifs": actifs,
             "surcharges": surcharges,
             "en_panne": en_panne,
@@ -85,6 +134,118 @@ def cluster_stats():
             "en_attente": tasks_waiting,
         },
     })
+
+
+# ──────────────────────────────────────────────
+# GET /api/nodes/cluster-logs
+# ──────────────────────────────────────────────
+@bp.route("/cluster-logs", methods=["GET"])
+@jwt_required()
+@gestionnaire_required
+def list_cluster_logs():
+    """
+    Lister les logs de programmes terminés, tels que reçus par le Receptionist.
+    ---
+    tags:
+      - Cluster — Noeuds (Gestionnaire)
+    summary: Logs de programmes (cluster)
+    description: |
+      Interroge en direct `GET /logs` sur le Receptionist (port 9010). Ces fichiers
+      sont écrits par le Receptionist quand le maître relaie, via le contrôleur,
+      le log complet d'un programme terminé (`PROG_LOG_TYPE`). Distinct de
+      `GET /api/tasks/<id>/logs`, qui lit `Programme.execution_log` en base.
+    security:
+      - BearerAuth: []
+    responses:
+      200:
+        description: Liste des fichiers de log disponibles.
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ApiSuccessResponse'
+              properties:
+                data:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      size:
+                        type: integer
+      401:
+        description: Token manquant ou invalide.
+      403:
+        description: Rôle gestionnaire requis.
+      503:
+        description: Receptionist injoignable.
+    """
+    try:
+        logs = fetch_cluster_logs()
+    except ReceptionistProxyError as exc:
+        return error(str(exc), status=503)
+
+    return success(data=logs)
+
+
+# ──────────────────────────────────────────────
+# GET /api/nodes/cluster-logs/<name>
+# ──────────────────────────────────────────────
+@bp.route("/cluster-logs/<path:log_name>", methods=["GET"])
+@jwt_required()
+@gestionnaire_required
+def get_cluster_log(log_name: str):
+    """
+    Contenu d'un log de programme, lu en direct depuis le Receptionist.
+    ---
+    tags:
+      - Cluster — Noeuds (Gestionnaire)
+    summary: Contenu d'un log de programme
+    description: |
+      Interroge en direct `GET /logs/<name>` sur le Receptionist (port 9010).
+      Le nom doit correspondre à l'une des entrées renvoyées par
+      `GET /api/nodes/cluster-logs`.
+    security:
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: log_name
+        required: true
+        schema:
+          type: string
+        description: Nom du fichier de log (ex. `submitted_prog.c.log`).
+    responses:
+      200:
+        description: Contenu du log.
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ApiSuccessResponse'
+              properties:
+                data:
+                  type: object
+                  properties:
+                    logs:
+                      type: string
+      401:
+        description: Token manquant ou invalide.
+      403:
+        description: Rôle gestionnaire requis.
+      404:
+        description: Fichier de log introuvable.
+      503:
+        description: Receptionist injoignable.
+    """
+    try:
+        content = fetch_cluster_log_content(log_name)
+    except ClusterLogNotFoundError:
+        return not_found("Log de programme")
+    except ReceptionistProxyError as exc:
+        return error(str(exc), status=503)
+
+    return success(data={"logs": content})
 
 
 # ──────────────────────────────────────────────
@@ -159,19 +320,27 @@ def list_nodes():
     status_filter = request.args.get("status")
     role_filter = request.args.get("role")
 
-    query = Node.query.order_by(Node.registered_at.desc())
-    if status_filter:
-        query = query.filter_by(status=status_filter)
-    if role_filter:
-        query = query.filter_by(role=role_filter)
+    try:
+        live_nodes = fetch_live_nodes()
+    except ReceptionistProxyError as exc:
+        return error(str(exc), status=503)
 
-    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+    if status_filter:
+        live_nodes = [n for n in live_nodes if n.get("status") == status_filter]
+    if role_filter:
+        live_nodes = [n for n in live_nodes if n.get("role") == role_filter]
+
+    total = len(live_nodes)
+    start = (page - 1) * per_page
+    page_items = live_nodes[start:start + per_page]
+    pages = max(1, (total + per_page - 1) // per_page)
+
     return success(data={
-        "items": [n.to_dict(include_profile=True) for n in pagination.items],
-        "total": pagination.total,
+        "items": [_live_node_to_dict(n) for n in page_items],
+        "total": total,
         "page": page,
         "per_page": per_page,
-        "pages": pagination.pages,
+        "pages": pages,
     })
 
 
@@ -183,14 +352,14 @@ def list_nodes():
 @gestionnaire_required
 def get_node(node_uuid: str):
     """
-    Détail d'un nœud avec son profil et ses heartbeats récents.
+    Détail d'un nœud (profil matériel + métriques courantes).
     ---
     tags:
       - Cluster — Noeuds (Gestionnaire)
     summary: Détail d'un nœud
     description: |
       Retourne le profil complet du nœud (capacités matérielles, statut actuel,
-      métriques temps réel) et les 10 derniers heartbeats reçus. Utile pour
+      métriques temps réel), lu en direct depuis le Receptionist. Utile pour
       la page de détail d'un nœud dans le tableau de bord gestionnaire.
     security:
       - BearerAuth: []
@@ -204,7 +373,7 @@ def get_node(node_uuid: str):
         example: node-dell-01
     responses:
       200:
-        description: Détail du nœud avec heartbeats récents.
+        description: Détail du nœud.
         content:
           application/json:
             schema:
@@ -212,13 +381,7 @@ def get_node(node_uuid: str):
                 - $ref: '#/components/schemas/ApiSuccessResponse'
               properties:
                 data:
-                  allOf:
-                    - $ref: '#/components/schemas/NodeResponse'
-                  properties:
-                    recent_heartbeats:
-                      type: array
-                      items:
-                        $ref: '#/components/schemas/HeartbeatRecord'
+                  $ref: '#/components/schemas/NodeResponse'
       401:
         description: Token manquant ou invalide.
         content:
@@ -238,38 +401,35 @@ def get_node(node_uuid: str):
             schema:
               $ref: '#/components/schemas/ApiErrorResponse'
     """
-    node = Node.query.get(node_uuid)
+    try:
+        live_nodes = fetch_live_nodes()
+    except ReceptionistProxyError as exc:
+        return error(str(exc), status=503)
+
+    node = next((n for n in live_nodes if n.get("uuid") == node_uuid), None)
     if node is None:
         return not_found("Noeud")
 
-    # Derniers heartbeats (10 plus récents)
-    recent_hb = (
-        node.heartbeats.order_by(db.desc("received_at")).limit(10).all()
-    )
-    data = node.to_dict(include_profile=True)
-    data["recent_heartbeats"] = [hb.to_dict() for hb in recent_hb]
-    return success(data=data)
+    return success(data=_live_node_to_dict(node))
 
 
 # ──────────────────────────────────────────────
-# DELETE /api/nodes/<uuid>
+# GET /api/nodes/<uuid>/logs
 # ──────────────────────────────────────────────
-@bp.route("/<node_uuid>", methods=["DELETE"])
+@bp.route("/<node_uuid>/logs", methods=["GET"])
 @jwt_required()
 @gestionnaire_required
-def remove_node(node_uuid: str):
+def node_logs(node_uuid: str):
     """
-    Retirer définitivement un nœud du cluster.
+    Log d'exécution d'un nœud, lu en direct depuis le Receptionist du cluster.
     ---
     tags:
       - Cluster — Noeuds (Gestionnaire)
-    summary: Retirer un nœud
+    summary: Logs d'un nœud
     description: |
-      Passe le nœud en statut `eteint`. Si des tâches sont assignées à ce nœud,
-      elles sont marquées `migree` pour réassignation automatique par l'agent maître.
-
-      **Irréversible** : le nœud devra se ré-enregistrer via
-      `POST /api/cluster/register` pour réintégrer le cluster.
+      Interroge en direct le Receptionist (`GET /node-logs/<uuid>` sur son port HTTP,
+      9010 par défaut), qui relaie la demande au contrôleur via la couche de gossip.
+      Aucune donnée n'est mise en cache côté backend Flask.
     security:
       - BearerAuth: []
     parameters:
@@ -278,59 +438,43 @@ def remove_node(node_uuid: str):
         required: true
         schema:
           type: string
-        description: UUID du nœud à retirer.
+        description: UUID du nœud.
     responses:
       200:
-        description: Nœud retiré et tâches migrées.
+        description: Contenu du log du nœud.
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ApiSuccessResponse'
+              allOf:
+                - $ref: '#/components/schemas/ApiSuccessResponse'
+              properties:
+                data:
+                  type: object
+                  properties:
+                    logs:
+                      type: string
       401:
         description: Token manquant ou invalide.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
       403:
         description: Rôle gestionnaire requis.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
       404:
-        description: Nœud introuvable.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
+        description: Aucun log disponible pour ce noeud.
+      503:
+        description: Receptionist ou contrôleur du cluster injoignable.
     """
-    node = Node.query.get(node_uuid)
-    if node is None:
-        return not_found("Noeud")
+    try:
+        logs = fetch_node_log(node_uuid)
+    except NodeLogNotFoundError:
+        return not_found("Log du noeud")
+    except ReceptionistProxyError as exc:
+        return error(str(exc), status=503)
 
-    # Migrer les sous-tâches en cours sur ce noeud
-    running = TacheAtomique.query.filter_by(
-        worker_node_uuid=node_uuid,
-    ).filter(
-        TacheAtomique.status.in_([
-            TacheStatus.ASSIGNEE.value,
-            TacheStatus.EN_COURS.value,
-        ])
-    ).all()
-
-    for task in running:
-        task.mark_migrated()
-
-    node.status = NodeStatus.ETEINT.value
-    db.session.commit()
-
-    return success(
-        message=f"Noeud {node_uuid[:8]} retiré du cluster. "
-                f"{len(running)} tâche(s) migrée(s)."
-    )
+    return success(data={"logs": logs})
 
 
+# ──────────────────────────────────────────────
+# DELETE /api/nodes/<uuid>
+# ──────────────────────────────────────────────
 # ──────────────────────────────────────────────
 # GET /api/nodes/<uuid>/tasks
 # ──────────────────────────────────────────────
@@ -345,8 +489,9 @@ def node_tasks(node_uuid: str):
       - Cluster — Noeuds (Gestionnaire)
     summary: Tâches d'un nœud
     description: |
-      Retourne les sous-tâches atomiques assignées à ce nœud (100 max, les plus récentes).
-      Utile pour diagnostiquer un nœud surchargé ou voir sa charge de travail actuelle.
+      Retourne les sous-tâches atomiques assignées à ce nœud (100 max, les plus récentes),
+      identifié par son UUID live (voir `GET /api/nodes/`). Ne dépend pas de la table
+      `nodes` en base — les sous-tâches référencent l'UUID du nœud directement.
     security:
       - BearerAuth: []
     parameters:
@@ -386,202 +531,14 @@ def node_tasks(node_uuid: str):
           application/json:
             schema:
               $ref: '#/components/schemas/ApiErrorResponse'
-      404:
-        description: Nœud introuvable.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
     """
-    node = Node.query.get(node_uuid)
-    if node is None:
-        return not_found("Noeud")
-
     status_filter = request.args.get("status")
-    query = node.assigned_tasks
+    query = TacheAtomique.query.filter_by(worker_node_uuid=node_uuid)
     if status_filter:
         query = query.filter_by(status=status_filter)
 
     tasks = query.order_by(TacheAtomique.created_at.desc()).limit(100).all()
     return success(data=[t.to_dict() for t in tasks])
-
-
-# ──────────────────────────────────────────────
-# GET /api/nodes/<uuid>/heartbeats
-# ──────────────────────────────────────────────
-@bp.route("/<node_uuid>/heartbeats", methods=["GET"])
-@jwt_required()
-@gestionnaire_required
-def node_heartbeats(node_uuid: str):
-    """
-    Historique des heartbeats d'un nœud.
-    ---
-    tags:
-      - Cluster — Noeuds (Gestionnaire)
-    summary: Historique heartbeats
-    description: |
-      Retourne l'historique des heartbeats reçus pour ce nœud (du plus récent au plus ancien).
-      Permet de tracer des courbes d'utilisation CPU/RAM dans le temps et détecter
-      les périodes de surcharge ou d'indisponibilité.
-    security:
-      - BearerAuth: []
-    parameters:
-      - in: path
-        name: node_uuid
-        required: true
-        schema:
-          type: string
-      - in: query
-        name: limit
-        schema:
-          type: integer
-          default: 50
-          maximum: 500
-        description: Nombre de heartbeats à retourner (max 500).
-    responses:
-      200:
-        description: Historique des heartbeats.
-        content:
-          application/json:
-            schema:
-              allOf:
-                - $ref: '#/components/schemas/ApiSuccessResponse'
-              properties:
-                data:
-                  type: array
-                  items:
-                    $ref: '#/components/schemas/HeartbeatRecord'
-      401:
-        description: Token manquant ou invalide.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
-      403:
-        description: Rôle gestionnaire requis.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
-      404:
-        description: Nœud introuvable.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
-    """
-    node = Node.query.get(node_uuid)
-    if node is None:
-        return not_found("Noeud")
-
-    limit = min(request.args.get("limit", 50, type=int), 500)
-    hbs = node.heartbeats.order_by(db.desc("received_at")).limit(limit).all()
-    return success(data=[hb.to_dict() for hb in hbs])
-
-
-# ──────────────────────────────────────────────
-# PATCH /api/nodes/<uuid>/maintenance
-# ──────────────────────────────────────────────
-@bp.route("/<node_uuid>/maintenance", methods=["PATCH"])
-@jwt_required()
-@gestionnaire_required
-def toggle_maintenance(node_uuid: str):
-    """
-    Activer ou désactiver le mode maintenance d'un nœud.
-    ---
-    tags:
-      - Cluster — Noeuds (Gestionnaire)
-    summary: Mode maintenance
-    description: |
-      **Activer** (`enable: true`) : le nœud passe en `en_maintenance`, ses tâches actives
-      sont migrées vers d'autres nœuds. Le nœud ne recevra plus de nouvelles tâches.
-
-      **Désactiver** (`enable: false`) : le nœud repasse en `actif` et redevient
-      éligible pour recevoir des tâches.
-
-      Utile pour planifier des interventions matérielles sans perturber les calculs en cours.
-    security:
-      - BearerAuth: []
-    parameters:
-      - in: path
-        name: node_uuid
-        required: true
-        schema:
-          type: string
-        description: UUID du nœud.
-    requestBody:
-      required: false
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/MaintenanceRequest'
-    responses:
-      200:
-        description: Statut du nœud mis à jour.
-        content:
-          application/json:
-            schema:
-              allOf:
-                - $ref: '#/components/schemas/ApiSuccessResponse'
-              properties:
-                data:
-                  $ref: '#/components/schemas/NodeResponse'
-      401:
-        description: Token manquant ou invalide.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
-      403:
-        description: Rôle gestionnaire requis.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
-      404:
-        description: Nœud introuvable.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
-      409:
-        description: Le nœud est déjà dans l'état demandé.
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiErrorResponse'
-    """
-    node = Node.query.get(node_uuid)
-    if node is None:
-        return not_found("Noeud")
-
-    data = request.get_json(silent=True) or {}
-    enable = data.get("enable", True)
-
-    if enable:
-        if node.status == NodeStatus.EN_MAINTENANCE.value:
-            return error("Le noeud est déjà en maintenance.", status=409)
-        # Migrer les tâches actives
-        running = TacheAtomique.query.filter_by(
-            worker_node_uuid=node_uuid,
-        ).filter(
-            TacheAtomique.status.in_([
-                TacheStatus.ASSIGNEE.value, TacheStatus.EN_COURS.value
-            ])
-        ).all()
-        for t in running:
-            t.mark_migrated()
-        node.status = NodeStatus.EN_MAINTENANCE.value
-        msg = f"Noeud {node_uuid[:8]} mis en maintenance. {len(running)} tâche(s) migrée(s)."
-    else:
-        if node.status != NodeStatus.EN_MAINTENANCE.value:
-            return error("Le noeud n'est pas en maintenance.", status=409)
-        node.status = NodeStatus.ACTIF.value
-        msg = f"Noeud {node_uuid[:8]} réactivé."
-
-    db.session.commit()
-    return success(data=node.to_dict(), message=msg)
-
 
 
 # ──────────────────────────────────────────────
@@ -591,46 +548,48 @@ def toggle_maintenance(node_uuid: str):
 @jwt_required()
 def get_master():
     """
-    Retourne les informations du nœud maître actif.
+    Retourne les informations du nœud maître actif, lues en direct depuis le Receptionist.
     Accessible à tous les utilisateurs authentifiés (chercheurs, étudiants, gestionnaires).
     Utilisé par le frontend pour afficher le maître courant avant soumission.
     """
     from flask import current_app
-    from app.models.node import NodeRole
 
-    master = Node.query.filter_by(
-        role=NodeRole.MASTER.value,
-        status=NodeStatus.ACTIF.value,
-    ).first()
-
-    controller = Node.query.filter_by(
-        role=NodeRole.CONTROLLER.value,
-        status=NodeStatus.ACTIF.value,
-    ).first()
-
-    # Infos de configuration .env (fallback)
     config_controller_ip = current_app.config.get("CONTROLLER_IP")
     config_master_ip = current_app.config.get("MASTER_NODE_IP")
+
+    try:
+        live_nodes = fetch_live_nodes()
+    except ReceptionistProxyError as exc:
+        return success(
+            data={
+                "master": None,
+                "controller": None,
+                "cluster_ready": False,
+                "config_controller_ip": config_controller_ip,
+                "config_master_ip": config_master_ip,
+            },
+            message=f"Cluster injoignable : {exc}",
+        )
+
+    master = next((n for n in live_nodes if n.get("role") == "master"), None)
+    controller = next((n for n in live_nodes if n.get("role") == "controller"), None)
 
     if master is None:
         return success(
             data={
                 "master": None,
-                "controller": controller.to_dict() if controller else None,
+                "controller": _live_node_to_dict(controller) if controller else None,
                 "cluster_ready": False,
                 "config_controller_ip": config_controller_ip,
                 "config_master_ip": config_master_ip,
             },
-            message=(
-                "Aucun nœud maître enregistré en base. "
-                f"Contrôleur configuré : {config_controller_ip or 'non défini'}."
-            ),
+            message="Aucun nœud maître actif dans le cluster actuellement.",
         )
 
     return success(
         data={
-            "master": master.to_dict(),
-            "controller": controller.to_dict() if controller else None,
+            "master": _live_node_to_dict(master),
+            "controller": _live_node_to_dict(controller) if controller else None,
             "cluster_ready": True,
             "config_controller_ip": config_controller_ip,
             "config_master_ip": config_master_ip,

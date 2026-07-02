@@ -20,12 +20,12 @@ from flask import Blueprint, current_app, request, send_file
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
 from app.extensions import db
-from app.models.node import Node, NodeRole, NodeStatus
 from app.models.programme import Programme, ProgrammeStatus
 from app.models.tache import TacheAtomique
 from app.models.user import User
 from app.services import storage as storage_svc
-from app.services.dispatch import DispatchError, discover_master_ip, send_programme_to_master
+from app.services.dispatch import DispatchError, _read_source_file
+from app.services.receptionist_proxy import ReceptionistProxyError, submit_program
 from app.services.storage import (
     ArchiveBombError,
     InvalidFileError,
@@ -346,10 +346,16 @@ def submit_programme(programme_id: str):
       Déclenche l'**événement E1** (Soumission de calcul) du tableau 2.11 du rapport.
       Le programme passe de `soumis` à `en_decomposition`.
 
-      L'agent maître prend ensuite en charge :
+      Le code source est envoyé tel quel (POST HTTP) au **Receptionist** du cluster
+      (`RECEPTIONIST_IP:RECEPTIONIST_HTTP_PORT`), qui le met en file d'attente et le
+      relaie au nœud maître dès que celui-ci est connu (voir
+      `code_submission_listener_thread` / `forward_code_to_master` dans
+      `Receptionnist/reception.c`). L'agent maître prend ensuite en charge :
       1. Lecture et analyse des annotations `@parallax.split`, `@parallax.dag`, `@parallax.shared`
       2. Création des sous-tâches atomiques en base
       3. Distribution aux workers disponibles
+
+      Uniquement supporté pour du C/C++ (seul langage compilé par l'agent maître).
 
       Peut aussi resoumettre un programme en `echec` pour une nouvelle tentative.
     security:
@@ -408,145 +414,92 @@ def submit_programme(programme_id: str):
     dispatch_required: bool = current_app.config.get("DISPATCH_REQUIRED", False)
     log = logging.getLogger(__name__)
 
-    # ── 1. Résoudre l'IP du maître ──────────────────────────────────────────
-    dispatch_info = _resolve_master_ip()
-    dispatch_skipped = False
-    dispatch_warning: str | None = None
-
-    if dispatch_info.get("error"):
-        if dispatch_required:
-            return error(dispatch_info["error"], status=503)
-        # Fallback : soumettre sans dispatch (dev / cluster non configuré)
-        dispatch_skipped = True
-        dispatch_warning = dispatch_info["error"]
-        log.warning("Dispatch ignoré (DISPATCH_REQUIRED=false) : %s", dispatch_warning)
-        prog.mark_submitted()
-        db.session.commit()
-        return success(
-            data={
-                "programme": prog.to_dict(include_progress=True),
-                "dispatch": None,
-                "dispatch_skipped": True,
-                "dispatch_warning": dispatch_warning,
-            },
-            message=(
-                "Programme soumis (sans dispatch cluster). "
-                "Lancez les simulateurs et soumettez à nouveau pour tester le dispatch TCP."
-            ),
-        )
-
-    master_ip: str = dispatch_info["master_ip"]
-    controller_ip: str | None = dispatch_info.get("controller_ip")
-
-    # ── 2. Envoyer le programme au maître via TCP ───────────────────────────
+    # ── 1. Lire le fichier source principal ─────────────────────────────────
     source_dir = Path(current_app.config["STORAGE_ROOT"]) / prog.source_rel_path
     try:
-        bytes_sent = send_programme_to_master(
-            master_ip=master_ip,
-            programme_name=prog.name,
-            source_path=source_dir,
-        )
+        code, actual_path = _read_source_file(source_dir, prog.name)
     except DispatchError as exc:
+        return error(str(exc), status=422)
+
+    code = _with_prog_name_marker(code, prog.id, actual_path.suffix)
+    code = _with_callback_markers(code, actual_path.suffix)
+
+    # ── 2. Envoyer le code au Receptionist du cluster ───────────────────────
+    try:
+        ack = submit_program(code)
+    except ReceptionistProxyError as exc:
         if dispatch_required:
-            return error(
-                f"Impossible d'envoyer le programme au maître ({master_ip}) : {exc}",
-                status=503,
-            )
-        # Fallback : soumettre malgré l'échec TCP
-        log.warning("Envoi TCP échoué, soumission quand même : %s", exc)
+            return error(str(exc), status=503)
+        # Fallback : soumettre malgré l'échec (dev / Receptionist non démarré)
+        log.warning("Envoi au Receptionist échoué, soumission quand même : %s", exc)
         prog.mark_submitted()
         db.session.commit()
         return success(
             data={
                 "programme": prog.to_dict(include_progress=True),
-                "dispatch": {"master_ip": master_ip, "controller_ip": controller_ip},
                 "dispatch_skipped": True,
                 "dispatch_warning": str(exc),
             },
-            message=f"Programme soumis (maître {master_ip} inaccessible — vérifiez le simulateur).",
+            message="Programme soumis (Receptionist inaccessible — vérifiez le cluster).",
         )
 
-    # ── 3. Marquer comme soumis uniquement après envoi réussi ───────────────
+    # ── 3. Marquer comme soumis ──────────────────────────────────────────────
     prog.mark_submitted()
     db.session.commit()
 
     return success(
         data={
             "programme": prog.to_dict(include_progress=True),
-            "dispatch": {
-                "master_ip": master_ip,
-                "controller_ip": controller_ip,
-                "bytes_sent": bytes_sent,
-            },
             "dispatch_skipped": False,
+            "receptionist_ack": ack,
         },
-        message=f"Programme envoyé au maître {master_ip}. Décomposition en cours.",
+        message="Programme envoyé au Receptionist du cluster. Décomposition en cours.",
     )
 
 
-def _resolve_master_ip() -> dict:
+def _with_prog_name_marker(code: bytes, programme_id: str, suffix: str) -> bytes:
     """
-    Détermine l'IP du nœud maître selon cette cascade :
-
-    Étape 1 — Contrôleur en base de données (nœud avec role=controller, status=actif)
-    Étape 2 — Contrôleur configuré en .env (CONTROLLER_IP)
-      → Envoie un message DISCOVER_MASTER au contrôleur
-      ← Reçoit l'IP du maître courant
-
-    Étape 3 — Maître en base de données (nœud avec role=master, status=actif)
-    Étape 4 — Maître configuré en .env (MASTER_NODE_IP) — fallback ultime
+    Préfixe le code d'un marqueur `__parallax_prog_name__ = "<uuid>"` si absent,
+    pour que le Receptionist nomme le log d'exécution d'après l'UUID du programme
+    (voir extract_prog_name dans Receptionnist/reception.c) plutôt que le nom
+    choisi par l'utilisateur. Deux utilisateurs peuvent nommer leur programme
+    de la même façon ; le Receptionist ne connaît que ce nom et écrase le
+    fichier de log précédent portant le même nom (logs/<nom>.c.log) — utiliser
+    l'UUID (déjà garanti unique) élimine cette collision. N'a de sens qu'en
+    C/C++, seul langage compilé par l'agent maître (gcc, voir
+    Execution_Master/utils/master_thread.c).
     """
-    from flask import current_app
+    if b"__parallax_prog_name__" in code or suffix.lower() not in (".c", ".h", ".cpp", ".hpp"):
+        return code
+    marker = f'// __parallax_prog_name__ = "{programme_id}"\n'.encode("utf-8")
+    return marker + code
 
-    log = logging.getLogger(__name__)
 
-    # ── 1. Chercher un contrôleur actif en base ──────────────────────────
-    controller: Node | None = Node.query.filter_by(
-        role=NodeRole.CONTROLLER.value,
-        status=NodeStatus.ACTIF.value,
-    ).first()
+def _with_callback_markers(code: bytes, suffix: str) -> bytes:
+    """
+    Préfixe le code de marqueurs `__parallax_callback_host__` /
+    `__parallax_callback_port__` si `BACKEND_CALLBACK_HOST` est configuré.
 
-    controller_ip = controller.ip if controller else None
-
-    # ── 2. Fallback : IP du contrôleur depuis la config .env ─────────────
-    if not controller_ip:
-        controller_ip = current_app.config.get("CONTROLLER_IP")
-        if controller_ip:
-            log.info("Aucun contrôleur en base, utilisation de CONTROLLER_IP=%s", controller_ip)
-
-    # ── 3. Interroger le contrôleur via DISCOVER_MASTER ──────────────────
-    if controller_ip:
-        try:
-            master_ip = discover_master_ip(controller_ip)
-            return {"master_ip": master_ip, "controller_ip": controller_ip}
-        except DispatchError as exc:
-            log.warning(
-                "Contrôleur %s inaccessible, tentative fallback : %s", controller_ip, exc
-            )
-
-    # ── 4. Fallback : maître actif en base ───────────────────────────────
-    master: Node | None = Node.query.filter_by(
-        role=NodeRole.MASTER.value,
-        status=NodeStatus.ACTIF.value,
-    ).first()
-
-    if master:
-        log.info("Utilisation du maître en base : %s", master.ip)
-        return {"master_ip": master.ip, "controller_ip": controller_ip}
-
-    # ── 5. Fallback ultime : MASTER_NODE_IP depuis la config .env ────────
-    master_node_ip = current_app.config.get("MASTER_NODE_IP")
-    if master_node_ip:
-        log.info("Utilisation de MASTER_NODE_IP=%s (fallback .env)", master_node_ip)
-        return {"master_ip": master_node_ip, "controller_ip": controller_ip}
-
-    return {
-        "error": (
-            "Aucun nœud maître disponible. "
-            "Vérifiez que le cluster est démarré et qu'un agent maître est enregistré, "
-            "ou configurez CONTROLLER_IP / MASTER_NODE_IP dans le fichier .env."
-        )
-    }
+    Le Receptionist les extrait au moment de la soumission (même mécanisme que
+    `__parallax_prog_name__`, voir Receptionnist/reception.c) et les associe au
+    nom du programme dans une table en mémoire. Quand le log d'exécution arrive
+    (PROG_LOG relayé par le maître via le contrôleur), le Receptionist rappelle
+    ce backend en HTTP (`POST /api/cluster/programme-result`) au lieu de se
+    contenter d'écrire le log sur disque — c'est ce qui permet de faire passer
+    `Programme.status` à `termine` sans que le backend ait besoin de sonder
+    `GET /api/nodes/cluster-logs` en boucle.
+    """
+    if suffix.lower() not in (".c", ".h", ".cpp", ".hpp"):
+        return code
+    host = current_app.config.get("BACKEND_CALLBACK_HOST")
+    if not host:
+        return code
+    port = current_app.config["BACKEND_CALLBACK_PORT"]
+    marker = (
+        f'// __parallax_callback_host__ = "{host}"\n'
+        f'// __parallax_callback_port__ = "{port}"\n'
+    ).encode("utf-8")
+    return marker + code
 
 
 # ──────────────────────────────────────────────

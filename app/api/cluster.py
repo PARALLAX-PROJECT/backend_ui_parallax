@@ -10,6 +10,7 @@ Routes :
   POST /tasks/<id>/result   – Worker retourne son résultat
   POST /tasks/<id>/error    – Worker signale une erreur
   GET  /tasks/next          – Worker demande la prochaine tâche disponible
+  POST /programme-result    – Callback du Receptionist : résultat d'un programme soumis
 """
 import json
 from datetime import datetime, timezone
@@ -557,6 +558,103 @@ def task_error(task_id: str):
         message="Erreur enregistrée.",
         data={"task_id": task_id, "status": task.status},
     )
+
+
+# ──────────────────────────────────────────────
+# POST /api/cluster/programme-result
+# ──────────────────────────────────────────────
+@bp.route("/programme-result", methods=["POST"])
+@cluster_internal
+def programme_result():
+    """
+    Callback du Receptionist : résultat d'exécution d'un programme soumis via /submit.
+    ---
+    tags:
+      - Cluster — API Interne
+    summary: Résultat d'un programme (push Receptionist)
+    description: |
+      Appelé par le Receptionist (`send_result_callback` dans
+      `Receptionnist/reception.c`) une fois qu'il a reçu le `PROG_LOG` du
+      programme relayé par le maître via le contrôleur. Le `programme_id` est
+      l'UUID injecté comme marqueur `__parallax_prog_name__` au moment de la
+      soumission (voir `app/api/tasks.py:_with_prog_name_marker`) — le
+      Receptionist ne fait que le faire suivre tel quel, il ne connaît pas
+      la notion de "programme" du backend.
+
+      Seul le chemin de succès est câblé côté C aujourd'hui : l'agent maître
+      n'envoie de `PROG_LOG` qu'après une compilation ET une exécution réussies
+      (voir `Execution_Master/utils/master_thread.c`) — un échec de compilation
+      ne produit aucun callback, et le programme reste `en_decomposition`
+      indéfiniment. `status` est donc accepté en entrée pour anticiper un futur
+      signal d'échec côté C, mais vaut `termine` en pratique pour l'instant.
+    security:
+      - ClusterKey: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - programme_id
+              - log
+            properties:
+              programme_id:
+                type: string
+                format: uuid
+              status:
+                type: string
+                enum: [termine, echec]
+                default: termine
+              log:
+                type: string
+    responses:
+      200:
+        description: Statut du programme mis à jour.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiSuccessResponse'
+      400:
+        description: Champ `programme_id` manquant.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+      401:
+        description: Clé cluster invalide.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+      404:
+        description: Programme introuvable (UUID inconnu ou déjà supprimé).
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+    """
+    data = request.get_json(silent=True) or {}
+    programme_id = (data.get("programme_id") or "").strip()
+    if not programme_id:
+        return error("Champ 'programme_id' requis.")
+
+    prog = Programme.query.get(programme_id)
+    if prog is None:
+        return not_found("Programme")
+
+    log_content = data.get("log") or ""
+    status = data.get("status") or ProgrammeStatus.TERMINE.value
+
+    prog.execution_log = log_content
+    if status == ProgrammeStatus.ECHEC.value:
+        prog.mark_failed("Échec signalé par l'agent maître.")
+    else:
+        prog.mark_done()
+
+    db.session.commit()
+
+    return success(message=f"Programme {programme_id[:8]} marqué {prog.status}.")
 
 
 # ──────────────────────────────────────────────

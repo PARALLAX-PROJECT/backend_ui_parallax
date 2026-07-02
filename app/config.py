@@ -58,6 +58,21 @@ class Config:
     # IP du maître configurée en .env (fallback ultime si DISCOVER_MASTER échoue)
     MASTER_NODE_IP = os.environ.get("MASTER_NODE_IP", "").strip() or None
 
+    # --- Proxy HTTP vers le Receptionist (vue live du cluster) ---
+    # Le Receptionist expose /nodes et /node-logs/<uuid> sur ce port, obtenus
+    # directement depuis la couche de gossip du contrôleur (voir Receptionnist/reception.c).
+    RECEPTIONIST_IP = os.environ.get("RECEPTIONIST_IP", "").strip() or None
+    RECEPTIONIST_HTTP_PORT = int(os.environ.get("RECEPTIONIST_HTTP_PORT", 9010))
+    RECEPTIONIST_TIMEOUT_S = float(os.environ.get("RECEPTIONIST_TIMEOUT_S", 5.0))
+
+    # --- Callback résultat (push Receptionist -> backend) ---
+    # IP/port sur lesquels CE backend est joignable depuis le cluster C, envoyés
+    # au Receptionist en marqueurs dans le code soumis (voir tasks.py:_with_callback_markers).
+    # Le Receptionist les relaie tels quels à log_receiver_thread côté C, qui
+    # rappelle POST /api/cluster/programme-result une fois le log reçu.
+    BACKEND_CALLBACK_HOST = os.environ.get("BACKEND_CALLBACK_HOST", "").strip() or None
+    BACKEND_CALLBACK_PORT = int(os.environ.get("BACKEND_CALLBACK_PORT", 5000))
+
     # --- Paramètres heartbeat ---
     HB_PERIOD_S = 2           # période unicast heartbeat
     HB_SUSPECT_THRESHOLD_S = 4  # délai avant SUSPECTED
