@@ -24,7 +24,7 @@ class Config:
     # Extensions autorisées pour les sources de calcul
     ALLOWED_SOURCE_EXTENSIONS = {
         ".py", ".c", ".cpp", ".h", ".hpp",
-        ".java", ".sh", ".f90", ".f", ".r", ".R",
+        ".java", ".sh", ".f90", ".f", ".r", ".R", ".txt",
     }
     ALLOWED_ARCHIVE_EXTENSIONS = {".zip", ".tar", ".gz", ".tgz"}
     # Taille max d'un fichier source décompressé (500 Mo)

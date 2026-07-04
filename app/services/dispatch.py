@@ -271,7 +271,7 @@ def send_programme_to_master(
 # ─── Helpers internes ────────────────────────────────────────────────────────
 
 # Priorité des extensions pour trouver le point d'entrée
-_ENTRY_PRIORITY = [".py", ".c", ".cpp", ".java", ".f90", ".f", ".r", ".sh"]
+_ENTRY_PRIORITY = [".c", ".cpp", ".py", ".java", ".f90", ".f", ".r", ".sh"]
 
 
 def _read_source_file(source_dir: Path, programme_name: str) -> tuple[bytes, Path]:
@@ -302,7 +302,7 @@ def _read_source_file(source_dir: Path, programme_name: str) -> tuple[bytes, Pat
     # 1. Correspondance par nom de programme
     prog_stem = programme_name.lower().replace(" ", "_").replace("-", "_")
     for f in all_files:
-        if f.stem.lower() == prog_stem:
+        if f.suffix.lower() in _ENTRY_PRIORITY and f.stem.lower() == prog_stem:
             logger.debug("Fichier source (correspondance nom) : %s", f)
             return f.read_bytes(), f
 

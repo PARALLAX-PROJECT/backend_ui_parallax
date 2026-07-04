@@ -24,6 +24,10 @@ from app.models.programme import Programme, ProgrammeStatus
 from app.models.tache import TacheAtomique
 from app.models.user import User
 from app.services import storage as storage_svc
+from app.services.predefined_programs import (
+    PredefinedProgramError,
+    generate_predefined_program,
+)
 from app.services.dispatch import DispatchError, _read_source_file
 from app.services.receptionist_proxy import ReceptionistProxyError, submit_program
 from app.services.storage import (
@@ -228,6 +232,14 @@ def import_programme():
 
     name = (request.form.get("name") or upload.filename).strip()[:255]
     description = (request.form.get("description") or "").strip()[:2000]
+    submission_mode = (request.form.get("submission_mode") or "source").strip().lower()
+    calculation_type = (request.form.get("calculation_type") or "").strip().lower()
+    if submission_mode not in {"source", "sum", "matrix"}:
+        return error("Mode de soumission invalide.", status=422)
+    if submission_mode != "source":
+        calculation_type = calculation_type or submission_mode
+        if Path(upload.filename).suffix.lower() != ".txt":
+            return error("Les calculs guides attendent un fichier .txt.", status=422)
 
     # Créer l'entrée en base AVANT de sauvegarder le fichier
     prog = Programme(
@@ -261,9 +273,32 @@ def import_programme():
         db.session.rollback()
         return server_error(f"Erreur lors de la sauvegarde : {exc}")
 
+    generated_size = 0
+    if submission_mode != "source":
+        source_dir = Path(current_app.config["STORAGE_ROOT"]) / rel_path
+        txt_files = sorted(source_dir.glob("*.txt"))
+        if not txt_files:
+            db.session.rollback()
+            delete_project(user_id, prog.id)
+            return error("Fichier .txt introuvable apres sauvegarde.", status=422)
+        try:
+            _, generated_size = generate_predefined_program(
+                calculation_type=calculation_type,
+                txt_path=txt_files[0],
+                output_dir=source_dir,
+            )
+        except PredefinedProgramError as exc:
+            db.session.rollback()
+            delete_project(user_id, prog.id)
+            return error(str(exc), status=422)
+        except Exception as exc:
+            db.session.rollback()
+            delete_project(user_id, prog.id)
+            return server_error(f"Erreur lors de la generation du programme PARALLAX : {exc}")
+
     prog.source_rel_path = rel_path
-    prog.source_size_bytes = size
-    user.storage_used_bytes += size
+    prog.source_size_bytes = size + generated_size
+    user.storage_used_bytes += size + generated_size
     db.session.commit()
 
     return created(
