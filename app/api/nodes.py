@@ -28,6 +28,7 @@ réel existe pour les porter.
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required
 
+from app.models.programme import Programme, ProgrammeStatus
 from app.models.tache import TacheAtomique, TacheStatus
 from app.services.receptionist_proxy import (
     ClusterLogNotFoundError,
@@ -38,6 +39,7 @@ from app.services.receptionist_proxy import (
     fetch_live_nodes,
     fetch_node_log,
 )
+from app.services.runtime_settings import get_receptionist_config, set_receptionist_config
 from app.utils.decorators import gestionnaire_required
 from app.utils.responses import error, not_found, success
 
@@ -57,10 +59,17 @@ def _live_node_to_dict(n: dict) -> dict:
             "cpu_usage": n.get("cpu"),
             "ram_usage": n.get("ram"),
             "score": n.get("score"),
+            "ram_available_mb": n.get("ram_available_mb"),
+            "disk_usage": n.get("disk_usage"),
         },
         "profile": {
             "cpu_cores": n.get("cores"),
             "cpu_model": n.get("model"),
+            "cpu_threads_per_core": n.get("threads_per_core"),
+            "cpu_freq_mhz": n.get("freq_mhz"),
+            "ram_total_mb": n.get("ram_total_mb"),
+            "disk_total_mb": n.get("disk_total_mb"),
+            "network_iface": n.get("network_iface"),
         },
     }
 
@@ -120,6 +129,7 @@ def cluster_stats():
 
     tasks_running = TacheAtomique.query.filter_by(status=TacheStatus.EN_COURS.value).count()
     tasks_waiting = TacheAtomique.query.filter_by(status=TacheStatus.EN_ATTENTE.value).count()
+    programmes_running = Programme.query.filter_by(status=ProgrammeStatus.EN_COURS.value).count()
 
     return success(data={
         "nodes": {
@@ -133,7 +143,82 @@ def cluster_stats():
             "en_cours": tasks_running,
             "en_attente": tasks_waiting,
         },
+        "programmes": {
+            "en_cours": programmes_running,
+        },
     })
+
+
+# ──────────────────────────────────────────────
+# GET/PUT /api/nodes/receptionist-config
+# ──────────────────────────────────────────────
+@bp.route("/receptionist-config", methods=["GET"])
+@jwt_required()
+@gestionnaire_required
+def read_receptionist_config():
+    """
+    Adresse actuelle du Receptionist utilisée par ce backend.
+    ---
+    tags:
+      - Cluster — Noeuds (Gestionnaire)
+    summary: Lire l'IP/port du Receptionist
+    security:
+      - BearerAuth: []
+    responses:
+      200:
+        description: Configuration courante.
+    """
+    return success(data=get_receptionist_config())
+
+
+@bp.route("/receptionist-config", methods=["PUT"])
+@jwt_required()
+@gestionnaire_required
+def update_receptionist_config():
+    """
+    Change l'IP/port du Receptionist utilisée par ce backend, sans redémarrage.
+    ---
+    tags:
+      - Cluster — Noeuds (Gestionnaire)
+    summary: Mettre à jour l'IP/port du Receptionist
+    description: |
+      Persisté dans instance/runtime_settings.json et appliqué immédiatement
+      à ce process — utile quand la machine hébergeant le Receptionist change
+      d'adresse (DHCP) en cours de session, sans avoir à éditer le .env ni
+      relancer le backend.
+    security:
+      - BearerAuth: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [ip, port]
+            properties:
+              ip: { type: string, example: "192.168.30.43" }
+              port: { type: integer, example: 9010 }
+    responses:
+      200:
+        description: Configuration mise à jour.
+      400:
+        description: IP ou port invalide.
+    """
+    body = request.get_json(silent=True) or {}
+    ip = (body.get("ip") or "").strip()
+    port = body.get("port")
+
+    if not ip:
+        return error("L'adresse IP est requise.", status=400)
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return error("Le port doit être un entier.", status=400)
+    if not (1 <= port <= 65535):
+        return error("Le port doit être compris entre 1 et 65535.", status=400)
+
+    updated = set_receptionist_config(ip, port)
+    return success(data=updated, message="Configuration du Receptionist mise à jour.")
 
 
 # ──────────────────────────────────────────────

@@ -25,6 +25,8 @@ import urllib.request
 
 from flask import current_app
 
+from app.services.runtime_settings import get_receptionist_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,13 +43,14 @@ class ClusterLogNotFoundError(Exception):
 
 
 def _receptionist_base_url() -> str:
-    ip = current_app.config.get("RECEPTIONIST_IP")
+    cfg = get_receptionist_config()
+    ip = cfg["ip"]
     if not ip:
         raise ReceptionistProxyError(
-            "RECEPTIONIST_IP non configuré (.env) — impossible de joindre le cluster."
+            "Adresse du Receptionist non configurée — renseignez-la depuis "
+            "l'interface (barre latérale) ou RECEPTIONIST_IP dans .env."
         )
-    port = current_app.config["RECEPTIONIST_HTTP_PORT"]
-    return f"http://{ip}:{port}"
+    return f"http://{ip}:{cfg['port']}"
 
 
 def _get(path: str) -> tuple[int, bytes]:
@@ -140,12 +143,14 @@ def submit_program(code: bytes) -> str:
 
     Retourne le corps de la réponse HTTP (normalement "OK").
     """
-    ip = current_app.config.get("RECEPTIONIST_IP")
+    cfg = get_receptionist_config()
+    ip = cfg["ip"]
     if not ip:
         raise ReceptionistProxyError(
-            "RECEPTIONIST_IP non configuré (.env) — impossible de joindre le cluster."
+            "Adresse du Receptionist non configurée — renseignez-la depuis "
+            "l'interface (barre latérale) ou RECEPTIONIST_IP dans .env."
         )
-    port = current_app.config["RECEPTIONIST_HTTP_PORT"]
+    port = cfg["port"]
     timeout = current_app.config["RECEPTIONIST_TIMEOUT_S"]
 
     request = (

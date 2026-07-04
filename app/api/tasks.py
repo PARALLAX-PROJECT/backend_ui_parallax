@@ -5,7 +5,10 @@ Routes :
   GET    /              – Liste des programmes de l'utilisateur courant
   POST   /import        – Upload du code source (multipart/form-data)
   GET    /<id>          – Détail d'un programme + progression
-  POST   /<id>/submit   – Soumettre pour exécution distribuée
+  GET    /<id>/source   – Voir le code source brut
+  POST   /<id>/parse    – Parser le code (Parser/build/mytool, côté backend)
+  GET    /<id>/parsed   – Voir le code parsé + log du parser
+  POST   /<id>/submit   – Soumettre le code PARSÉ pour exécution distribuée
   POST   /<id>/cancel   – Annuler l'exécution d'un programme (sans suppression)
   DELETE /<id>          – Supprimer définitivement un programme
   GET    /<id>/result   – Télécharger l'archive de résultats (ZIP)
@@ -25,6 +28,7 @@ from app.models.tache import TacheAtomique
 from app.models.user import User
 from app.services import storage as storage_svc
 from app.services.dispatch import DispatchError, _read_source_file
+from app.services.parser_svc import ParseError, parse_source
 from app.services.receptionist_proxy import ReceptionistProxyError, submit_program
 from app.services.storage import (
     ArchiveBombError,
@@ -331,6 +335,170 @@ def get_programme(programme_id: str):
 
 
 # ──────────────────────────────────────────────
+# GET /api/tasks/<id>/source
+# ──────────────────────────────────────────────
+@bp.route("/<programme_id>/source", methods=["GET"])
+@jwt_required()
+def get_source(programme_id: str):
+    """
+    Consulter le code source brut importé (avant parsing).
+    ---
+    tags:
+      - Projets (Chercheur)
+    summary: Voir le code source
+    security:
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: programme_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    responses:
+      200:
+        description: Contenu du fichier source principal.
+      404:
+        description: Programme introuvable ou aucun fichier source associé.
+    """
+    user_id = get_jwt_identity()
+    prog, err_resp = _get_programme_or_404(programme_id, user_id)
+    if err_resp:
+        return err_resp
+    if not prog.source_rel_path:
+        return not_found("Fichier source")
+
+    source_dir = Path(current_app.config["STORAGE_ROOT"]) / prog.source_rel_path
+    try:
+        code, _ = _read_source_file(source_dir, prog.name)
+    except DispatchError as exc:
+        return error(str(exc), status=422)
+
+    return success(data={"source": code.decode("utf-8", errors="replace")})
+
+
+# ──────────────────────────────────────────────
+# POST /api/tasks/<id>/parse
+# ──────────────────────────────────────────────
+@bp.route("/<programme_id>/parse", methods=["POST"])
+@jwt_required()
+def parse_programme(programme_id: str):
+    """
+    Parser le code source (Parser/build/mytool) pour prévisualiser le
+    résultat avant soumission.
+    ---
+    tags:
+      - Projets (Chercheur)
+    summary: Parser le code
+    description: |
+      Lance le même outil (Parser/build/mytool) que le maître C utilisait
+      auparavant en interne — voir Execution_Master/utils/master_thread.c,
+      qui ne parse plus lui-même : `POST .../submit` exige désormais que
+      cette étape ait réussi, et envoie le code **parsé** au cluster, pas
+      le source brut. Peut être relancé autant de fois que nécessaire
+      (écrase le résultat précédent).
+    security:
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: programme_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    responses:
+      200:
+        description: Code parsé avec succès.
+      404:
+        description: Programme introuvable ou aucun fichier source associé.
+      422:
+        description: Échec du parsing (voir parse_log dans la réponse).
+    """
+    user_id = get_jwt_identity()
+    prog, err_resp = _get_programme_or_404(programme_id, user_id)
+    if err_resp:
+        return err_resp
+    if not prog.source_rel_path:
+        return not_found("Fichier source")
+
+    source_dir = Path(current_app.config["STORAGE_ROOT"]) / prog.source_rel_path
+    try:
+        code, actual_path = _read_source_file(source_dir, prog.name)
+    except DispatchError as exc:
+        return error(str(exc), status=422)
+
+    if actual_path.suffix.lower() not in (".c", ".h", ".cpp", ".hpp"):
+        return error(
+            "Le parsing PARALLAX n'est disponible que pour du C/C++.",
+            status=422,
+        )
+
+    try:
+        parsed_code, parse_log = parse_source(code, prog.id)
+    except ParseError as exc:
+        prog.parse_status = "failed"
+        prog.parse_log = str(exc)
+        prog.parsed_code = None
+        prog.parsed_at = datetime.now(timezone.utc)
+        db.session.commit()
+        return error(
+            "Le parsing a échoué — voir parse_log.",
+            status=422,
+            details={"parse_status": "failed", "parse_log": prog.parse_log},
+        )
+
+    prog.parsed_code = parsed_code
+    prog.parse_status = "ok"
+    prog.parse_log = parse_log
+    prog.parsed_at = datetime.now(timezone.utc)
+    db.session.commit()
+
+    return success(
+        data={"parse_status": "ok", "parse_log": parse_log, "parsed_code": parsed_code},
+        message="Code parsé avec succès.",
+    )
+
+
+# ──────────────────────────────────────────────
+# GET /api/tasks/<id>/parsed
+# ──────────────────────────────────────────────
+@bp.route("/<programme_id>/parsed", methods=["GET"])
+@jwt_required()
+def get_parsed(programme_id: str):
+    """
+    Consulter le code parsé (résultat du dernier POST .../parse).
+    ---
+    tags:
+      - Projets (Chercheur)
+    summary: Voir le code parsé
+    security:
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: programme_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    responses:
+      200:
+        description: Code parsé + log du parser (peut être vide si jamais parsé).
+      404:
+        description: Programme introuvable.
+    """
+    user_id = get_jwt_identity()
+    prog, err_resp = _get_programme_or_404(programme_id, user_id)
+    if err_resp:
+        return err_resp
+    return success(data={
+        "parse_status": prog.parse_status,
+        "parse_log": prog.parse_log,
+        "parsed_code": prog.parsed_code,
+        "parsed_at": prog.parsed_at.isoformat() if prog.parsed_at else None,
+    })
+
+
+# ──────────────────────────────────────────────
 # POST /api/tasks/<id>/submit
 # ──────────────────────────────────────────────
 @bp.route("/<programme_id>/submit", methods=["POST"])
@@ -410,19 +578,21 @@ def submit_programme(programme_id: str):
         )
     if not prog.source_rel_path:
         return error("Aucun fichier source associé. Importez d'abord votre code.")
+    if prog.parse_status != "ok" or not prog.parsed_code:
+        return error(
+            "Le code doit d'abord être parsé avec succès (POST .../parse) "
+            "avant de pouvoir être soumis au cluster.",
+            status=409,
+        )
 
     dispatch_required: bool = current_app.config.get("DISPATCH_REQUIRED", False)
     log = logging.getLogger(__name__)
 
-    # ── 1. Lire le fichier source principal ─────────────────────────────────
-    source_dir = Path(current_app.config["STORAGE_ROOT"]) / prog.source_rel_path
-    try:
-        code, actual_path = _read_source_file(source_dir, prog.name)
-    except DispatchError as exc:
-        return error(str(exc), status=422)
-
-    code = _with_prog_name_marker(code, prog.id, actual_path.suffix)
-    code = _with_callback_markers(code, actual_path.suffix)
+    # ── 1. Code déjà parsé (voir POST .../parse) — le maître C ne parse plus
+    #      lui-même, il compile directement ce qu'on lui envoie ici ────────
+    code = prog.parsed_code.encode("utf-8")
+    code = _with_prog_name_marker(code, prog.id, ".c")
+    code = _with_callback_markers(code, ".c")
 
     # ── 2. Envoyer le code au Receptionist du cluster ───────────────────────
     try:
@@ -475,10 +645,32 @@ def _with_prog_name_marker(code: bytes, programme_id: str, suffix: str) -> bytes
     return marker + code
 
 
+def _detect_own_lan_ip() -> str | None:
+    """
+    Best-effort detection of this machine's own LAN-reachable IP address.
+
+    Opens a UDP socket "connected" to a well-known public address - this
+    never actually sends a packet (UDP connect() just asks the kernel to
+    pick the outbound route/interface for that destination), then reads
+    back the local endpoint the kernel chose. Same trick the C agents use
+    via get_local_ip()/getifaddrs(), just without needing an explicit
+    interface name.
+
+    Returns None if there's no network route at all (e.g. fully offline).
+    """
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return None
+
+
 def _with_callback_markers(code: bytes, suffix: str) -> bytes:
     """
     Préfixe le code de marqueurs `__parallax_callback_host__` /
-    `__parallax_callback_port__` si `BACKEND_CALLBACK_HOST` est configuré.
+    `__parallax_callback_port__` si un hôte de callback est disponible.
 
     Le Receptionist les extrait au moment de la soumission (même mécanisme que
     `__parallax_prog_name__`, voir Receptionnist/reception.c) et les associe au
@@ -488,10 +680,23 @@ def _with_callback_markers(code: bytes, suffix: str) -> bytes:
     contenter d'écrire le log sur disque — c'est ce qui permet de faire passer
     `Programme.status` à `termine` sans que le backend ait besoin de sonder
     `GET /api/nodes/cluster-logs` en boucle.
+
+    BACKEND_CALLBACK_HOST (.env) n'est utilisé que s'il est explicitement
+    configuré à autre chose que 127.0.0.1/localhost - une adresse loopback ne
+    veut rien dire pour le Receptionist/maître, qui tournent presque toujours
+    sur une AUTRE machine que ce backend. Par défaut on détecte l'IP LAN
+    réelle de cette machine à chaque soumission, pour ne pas se retrouver
+    avec une adresse figée qui devient fausse dès que ce backend change de
+    réseau (DHCP) - le même problème qu'on a chassé toute la session côté
+    agents C.
     """
     if suffix.lower() not in (".c", ".h", ".cpp", ".hpp"):
         return code
-    host = current_app.config.get("BACKEND_CALLBACK_HOST")
+    configured = current_app.config.get("BACKEND_CALLBACK_HOST")
+    if configured and configured not in ("127.0.0.1", "localhost"):
+        host = configured
+    else:
+        host = _detect_own_lan_ip() or configured
     if not host:
         return code
     port = current_app.config["BACKEND_CALLBACK_PORT"]

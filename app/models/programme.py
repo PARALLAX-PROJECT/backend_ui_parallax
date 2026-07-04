@@ -59,6 +59,16 @@ class Programme(db.Model):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_log: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # --- Parsing côté backend (Parser/build/mytool) ---
+    # Le maître C ne parse plus le code lui-même (voir Execution_Master/utils/
+    # master_thread.c) : parsed_code est ce qu'on lui envoie désormais via
+    # /submit, à la place du source brut. "submit" refuse tant que parse_status
+    # n'est pas "ok" (voir POST /api/tasks/<id>/parse).
+    parsed_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parse_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    parse_log: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     owner: Mapped["User"] = relationship("User", back_populates="programmes")  # noqa: F821
     taches: Mapped[list["TacheAtomique"]] = relationship(  # noqa: F821
         "TacheAtomique",
@@ -126,6 +136,8 @@ class Programme(db.Model):
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "error_message": self.error_message,
+            "parse_status": self.parse_status,
+            "parsed_at": self.parsed_at.isoformat() if self.parsed_at else None,
         }
         if include_progress:
             data["progress"] = self.progress()
