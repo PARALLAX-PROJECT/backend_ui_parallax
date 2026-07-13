@@ -15,6 +15,7 @@ Routes :
   GET    /<id>/logs     – Logs d'exécution
   GET    /<id>/tasks    – Sous-tâches atomiques du programme
 """
+import io
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from app.extensions import db
 from app.models.programme import Programme, ProgrammeStatus
 from app.models.tache import TacheAtomique
 from app.models.user import User
+from app.services import program_templates as templates_svc
 from app.services import storage as storage_svc
 from app.services.dispatch import DispatchError, _read_source_file
 from app.services.parser_svc import ParseError, parse_source
@@ -35,6 +37,7 @@ from app.services.storage import (
     InvalidFileError,
     QuotaExceededError,
     delete_project,
+    delete_project_results,
     get_result_archive_path,
     save_project_source,
 )
@@ -273,6 +276,190 @@ def import_programme():
     return created(
         data=prog.to_dict(),
         message="Programme importé avec succès.",
+    )
+
+
+# ──────────────────────────────────────────────
+# GET /api/tasks/templates
+# ──────────────────────────────────────────────
+@bp.route("/templates", methods=["GET"])
+@jwt_required()
+def list_programme_templates():
+    """
+    Lister les templates de programmes disponibles.
+    ---
+    tags:
+      - Projets (Chercheur)
+    summary: Templates disponibles
+    description: |
+      Programmes PARALLAX prêts à l'emploi (somme, multiplication matrice x
+      vecteur…). Alternative à l'upload de code : voir POST .../from-template,
+      où l'utilisateur ne fournit qu'un fichier de données (.txt).
+    security:
+      - BearerAuth: []
+    responses:
+      200:
+        description: Liste des templates disponibles.
+      401:
+        description: Token manquant ou invalide.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+    """
+    return success(data=templates_svc.list_templates())
+
+
+# ──────────────────────────────────────────────
+# POST /api/tasks/from-template
+# ──────────────────────────────────────────────
+@bp.route("/from-template", methods=["POST"])
+@jwt_required()
+def import_from_template():
+    """
+    Créer un programme à partir d'un template + de ses fichiers de données.
+    ---
+    tags:
+      - Projets (Chercheur)
+    summary: Importer depuis un template
+    description: |
+      Alternative à POST /api/tasks/import pour les utilisateurs qui ne
+      veulent pas écrire de code C : choisissez un template (voir GET
+      .../templates, qui renvoie pour chacun la liste `data_files` — un slot
+      par fichier attendu, ex. un seul `values` pour la somme, `matrix` +
+      `vector` pour la multiplication) et fournissez un fichier .txt par slot,
+      chaque fichier étant envoyé sous le nom de champ multipart correspondant
+      à `data_files[i].id`. Le backend génère le code source en y injectant
+      les données, puis se comporte comme /import (même quota, mêmes étapes
+      /parse puis /submit ensuite).
+    security:
+      - BearerAuth: []
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            required:
+              - template_id
+            description: >
+              En plus de template_id/name/description, un champ fichier par
+              slot déclaré dans data_files (ex. "values", ou "matrix" +
+              "vector") — voir GET .../templates.
+            properties:
+              template_id:
+                type: string
+                example: sum
+              name:
+                type: string
+                maxLength: 255
+              description:
+                type: string
+                maxLength: 2000
+    responses:
+      201:
+        description: Programme généré et importé avec succès.
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ApiSuccessResponse'
+              properties:
+                data:
+                  $ref: '#/components/schemas/ProgrammeResponse'
+      400:
+        description: template_id manquant/inconnu ou fichier de données manquant.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+      413:
+        description: Quota disque utilisateur dépassé.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+      422:
+        description: Données mal formées pour ce template, ou trop volumineuses
+          pour tenir dans la limite de code du cluster.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+      401:
+        description: Token manquant ou invalide.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+    """
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    if user is None:
+        return error("Utilisateur introuvable.", status=401)
+
+    template_id = (request.form.get("template_id") or "").strip()
+    template = templates_svc.get_template(template_id)
+    if template is None:
+        return error(f"Template inconnu : {template_id!r}.")
+
+    # Un champ fichier par slot déclaré dans template.data_files (ex. "values"
+    # pour la somme, "matrix" + "vector" pour la multiplication) — pas de champ
+    # générique "file", le nombre et le sens des fichiers dépend du template.
+    data_bytes: dict[str, bytes] = {}
+    for slot in template.data_files:
+        upload = request.files.get(slot.id)
+        if upload is None or not upload.filename:
+            return error(f"Fichier manquant pour le champ « {slot.label} » ({slot.id}).")
+        data_bytes[slot.id] = upload.stream.read()
+
+    try:
+        source = template.build_source(data_bytes)
+    except templates_svc.TemplateError as exc:
+        return error(str(exc), status=422)
+
+    name = (request.form.get("name") or template.name).strip()[:255]
+    description = (request.form.get("description") or "").strip()[:2000]
+
+    prog = Programme(
+        name=name,
+        description=description or None,
+        owner_id=user_id,
+        original_filename=f"{template.id}.c",
+        status=ProgrammeStatus.SOUMIS.value,
+    )
+    db.session.add(prog)
+    db.session.flush()
+
+    try:
+        rel_path, size = save_project_source(
+            user_id=user_id,
+            programme_id=prog.id,
+            file_stream=io.BytesIO(source.encode("utf-8")),
+            filename=f"{template.id}.c",
+            current_usage_bytes=user.storage_used_bytes,
+        )
+    except QuotaExceededError as exc:
+        db.session.rollback()
+        return error(str(exc), status=413)
+    except InvalidFileError as exc:
+        db.session.rollback()
+        return error(str(exc), status=422)
+    except ArchiveBombError as exc:
+        db.session.rollback()
+        return error(str(exc), status=422)
+    except Exception as exc:
+        db.session.rollback()
+        return server_error(f"Erreur lors de la sauvegarde : {exc}")
+
+    prog.source_rel_path = rel_path
+    prog.source_size_bytes = size
+    user.storage_used_bytes += size
+    db.session.commit()
+
+    return created(
+        data=prog.to_dict(),
+        message="Programme généré depuis le template et importé avec succès.",
     )
 
 
@@ -765,6 +952,112 @@ def cancel_own_programme(programme_id: str):
     return success(
         data=prog.to_dict(include_progress=True),
         message=f"Programme annulé. {len(active_tasks)} sous-tâche(s) interrompue(s).",
+    )
+
+
+# ──────────────────────────────────────────────
+# POST /api/tasks/<id>/reset
+# ──────────────────────────────────────────────
+@bp.route("/<programme_id>/reset", methods=["POST"])
+@jwt_required()
+def reset_programme(programme_id: str):
+    """
+    Remettre un programme terminé/échoué/annulé à zéro pour recommencer tout
+    le pipeline depuis le début — y compris avant le parsing — sans avoir à
+    réuploader le code source.
+    ---
+    tags:
+      - Projets (Chercheur)
+    summary: Recommencer depuis le début
+    description: |
+      Contrairement à POST /api/tasks/{id}/submit (qui exige un parsing déjà
+      réussi et ne fait que renvoyer le code déjà parsé), ce endpoint efface
+      le résultat du parsing précédent, les sous-tâches et les résultats
+      d'exécution, et repasse le programme à l'état `soumis` — l'utilisateur
+      doit ensuite relancer POST .../parse puis POST .../submit, exactement
+      comme pour un import tout neuf. Le fichier source original n'est pas
+      touché.
+
+      Uniquement disponible pour un programme dans un état terminal
+      (`termine`, `echec`, `annule`) — pour un programme en cours, utilisez
+      d'abord POST .../cancel.
+    security:
+      - BearerAuth: []
+    parameters:
+      - in: path
+        name: programme_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    responses:
+      200:
+        description: Programme réinitialisé, prêt à reparser et resoumettre.
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ApiSuccessResponse'
+              properties:
+                data:
+                  $ref: '#/components/schemas/ProgrammeResponse'
+      404:
+        description: Programme introuvable.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+      409:
+        description: Le programme n'est pas dans un état terminal.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+      401:
+        description: Token manquant ou invalide.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiErrorResponse'
+    """
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    prog, err_resp = _get_programme_or_404(programme_id, user_id)
+    if err_resp:
+        return err_resp
+
+    if not prog.is_terminal:
+        return error(
+            f"Le programme est encore actif (« {prog.status} ») — "
+            "annulez-le d'abord (POST .../cancel) si besoin.",
+            status=409,
+        )
+
+    # Sous-tâches de l'exécution précédente : sans intérêt une fois reparti de zéro.
+    prog.taches.delete(synchronize_session=False)
+
+    # Résultats de l'exécution précédente (le code source original est conservé).
+    freed = delete_project_results(user_id, programme_id)
+    if user and freed > 0:
+        user.storage_used_bytes = max(0, user.storage_used_bytes - freed)
+
+    prog.status = ProgrammeStatus.SOUMIS.value
+    prog.parsed_code = None
+    prog.parse_status = None
+    prog.parse_log = None
+    prog.parsed_at = None
+    prog.submitted_at = None
+    prog.started_at = None
+    prog.completed_at = None
+    prog.error_message = None
+    prog.execution_log = None
+    prog.result_rel_path = None
+    prog.result_size_bytes = 0
+    db.session.commit()
+
+    return success(
+        data=prog.to_dict(include_progress=True),
+        message="Programme réinitialisé — prêt à reparser et resoumettre depuis le début.",
     )
 
 

@@ -177,6 +177,21 @@ def get_result_archive_path(user_id: str, programme_id: str) -> Path | None:
     return archive_path
 
 
+def delete_project_results(user_id: str, programme_id: str) -> int:
+    """
+    Supprime uniquement les résultats d'une exécution précédente (garde le
+    code source) - utilisé par POST /api/tasks/<id>/reset pour repartir de
+    zéro sans avoir à réuploader le programme.
+    Retourne le nombre d'octets libérés.
+    """
+    result_dir = project_result_dir(user_id, programme_id)
+    if not result_dir.exists():
+        return 0
+    freed = _dir_size(result_dir)
+    shutil.rmtree(result_dir, ignore_errors=True)
+    return freed
+
+
 def delete_project(user_id: str, programme_id: str) -> int:
     """
     Supprime tous les fichiers d'un projet.
